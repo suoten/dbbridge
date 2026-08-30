@@ -15,6 +15,7 @@ import (
 	"time"
 
 	types "dbbridge/pkg"
+	"dbbridge/internal/typeconv"
 )
 
 // ProgressCallback 进度回调函数
@@ -447,6 +448,18 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 			}
 			if len(rows) == 0 {
 				break
+			}
+
+			// 规范化时间值：SQLite 等库可能把 time.Time 以 Go 字符串形式存入 TEXT 列，
+			// 直接写入目标库会报 1292/22007，这里统一还原为标准 datetime 字符串
+			for _, row := range rows {
+				for k, v := range row {
+					if s, ok := v.(string); ok {
+						if nv, changed := typeconv.NormalizeTimeValue(s); changed {
+							row[k] = nv
+						}
+					}
+				}
 			}
 
 			if err := o.targetAdapter.WriteData(ctx, tableName, columns, rows); err != nil {

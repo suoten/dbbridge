@@ -152,6 +152,57 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 
 	schema.Columns = columns
 
+	// 识别 rowid 别名：SQLite 中单列 INTEGER PRIMARY KEY（无论写成列约束还是表约束）
+	// 等价于自增主键（MySQL AUTO_INCREMENT / PG SERIAL），迁移时需标记 AutoIncrement，
+	// 否则反向迁移（SQLite→MySQL）会丢失自增属性。
+	if len(pkColumns) == 1 {
+		var ddl sql.NullString
+		err := a.db.QueryRowContext(ctx,
+			`SELECT sql FROM sqlite_master WHERE type='table' AND name = ?`, tableName,
+		).Scan(&ddl)
+		if err == nil && ddl.Valid {
+			for i := range schema.Columns {
+				c := &schema.Columns[i]
+				if c.IsPrimaryKey && strings.EqualFold(strings.TrimSpace(c.DataType), "INTEGER") {
+					c.AutoIncrement = true
+					// MySQL 中自增列必须非空，显式补 NOT NULL
+					c.Nullable = false
+					break
+				}
+			}
+		}
+	}
+
+	// TEXT 列值采样：SQLite 无原生日期时间类型，MySQL/PG 迁来时时间列都变成 TEXT，
+	// 通过采样还原时间语义（全部非空样本都是 datetime 形态才推断），避免反向迁移丢失时间类型
+	for i := range schema.Columns {
+		col := &schema.Columns[i]
+		if col.BaseType != "TEXT" || col.IsPrimaryKey {
+			continue
+		}
+		srows, err := a.db.QueryContext(ctx, fmt.Sprintf(
+			`SELECT %q FROM %q WHERE %q IS NOT NULL AND %q != '' LIMIT 50`,
+			col.Name, tableName, col.Name, col.Name))
+		if err != nil {
+			continue
+		}
+		total, temporal := 0, 0
+		for srows.Next() {
+			var v string
+			if srows.Scan(&v) != nil {
+				break
+			}
+			total++
+			if typeconv.LooksLikeDateTime(v) {
+				temporal++
+			}
+		}
+		srows.Close()
+		if total > 0 && temporal == total {
+			col.BaseType = "DATETIME"
+		}
+	}
+
 	// 如果有主键列，创建主键索引
 	if len(pkColumns) > 0 {
 		schema.Indexes = append(schema.Indexes, types.IndexMeta{
@@ -162,43 +213,55 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		})
 	}
 
-	// 获取索引信息
+	// 获取索引信息：先收集索引名并关闭结果集，
+	// 再逐个查询索引列（连接池有限，遍历时嵌套查询会死锁）
+	type idxInfo struct {
+		name   string
+		unique bool
+	}
+	var idxList []idxInfo
 	indexRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%q)", tableName))
 	if err == nil {
-		defer indexRows.Close()
 		for indexRows.Next() {
-			var seq int
-			var name string
-			var unique, partial int
-			if err := indexRows.Scan(&seq, &name, &unique, &partial); err != nil {
-				continue
+			// 现代 SQLite 返回 5 列 (seq,name,unique,origin,partial)，老版本 3 列；
+			// 列数不匹配会导致 Scan 失败，此处做兼容，避免静默丢失全部二级索引
+			var seq, unique, partial int
+			var name, origin string
+			if err := indexRows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+				if err := indexRows.Scan(&seq, &name, &unique); err != nil {
+					continue
+				}
 			}
 			if name == "PRIMARY" || strings.HasPrefix(name, "sqlite_") {
 				continue
 			}
+			idxList = append(idxList, idxInfo{name: name, unique: unique == 1})
+		}
+		indexRows.Close()
+	}
 
-			// 获取索引列
-			idxColRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%q)", name))
-			if err != nil {
+	for _, it := range idxList {
+		// 获取索引列
+		idxColRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%q)", it.name))
+		if err != nil {
+			continue
+		}
+		var idxCols []string
+		for idxColRows.Next() {
+			var seqno, cid int
+			var colName string
+			if err := idxColRows.Scan(&seqno, &cid, &colName); err != nil {
 				continue
 			}
-			var idxCols []string
-			for idxColRows.Next() {
-				var seqno, cid int
-				var colName string
-				if err := idxColRows.Scan(&seqno, &cid, &colName); err != nil {
-					continue
-				}
-				idxCols = append(idxCols, colName)
-			}
-			idxColRows.Close()
-
-			schema.Indexes = append(schema.Indexes, types.IndexMeta{
-				Name:     name,
-				Columns:  idxCols,
-				IsUnique: unique == 1,
-			})
+			idxCols = append(idxCols, colName)
 		}
+		idxColRows.Close()
+
+		schema.Indexes = append(schema.Indexes, types.IndexMeta{
+			Name:     it.name,
+			Columns:  idxCols,
+			IsUnique: it.unique,
+		})
 	}
 
 	return schema, nil
@@ -411,6 +474,10 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
+				// time.Time 直写会以 Go 字符串形式落入 TEXT 列，统一转为标准 datetime 格式
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05")
+				}
 				values[i] = val
 			} else {
 				values[i] = nil

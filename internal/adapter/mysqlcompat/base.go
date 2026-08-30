@@ -348,13 +348,34 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s` (\n", escapeIdent(table.Name)))
 
+	// 收集参与索引（主键/唯一/普通）的列：MySQL 键列不允许 TEXT/BLOB/JSON 无长度（Error 1170）
+	indexedCols := map[string]bool{}
+	for _, idx := range table.Indexes {
+		for _, c := range idx.Columns {
+			indexedCols[c] = true
+		}
+	}
+	for _, col := range table.Columns {
+		if col.IsPrimaryKey {
+			indexedCols[col.Name] = true
+		}
+	}
+
 	for i, col := range table.Columns {
 		if i > 0 {
 			sb.WriteString(",\n")
 		}
 		sb.WriteString("  ")
 		sb.WriteString(fmt.Sprintf("`%s` ", escapeIdent(col.Name)))
-		sb.WriteString(a.MapType(col))
+		colType := a.MapType(col)
+		// 键列上的 TEXT/BLOB/JSON 降级为 VARCHAR(191)（utf8mb4 下 764 字节，兼容所有 InnoDB 行格式）
+		if indexedCols[col.Name] {
+			switch colType {
+			case "TEXT", "BLOB", "JSON", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT":
+				colType = "VARCHAR(191)"
+			}
+		}
+		sb.WriteString(colType)
 
 		if !col.Nullable {
 			sb.WriteString(" NOT NULL")

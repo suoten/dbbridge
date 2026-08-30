@@ -155,3 +155,120 @@ func TestCancelContext(t *testing.T) {
 		t.Error("取消后的查询应返回错误")
 	}
 }
+
+// TestRowidAliasAutoIncrement 单列 INTEGER PRIMARY KEY 是 rowid 别名，
+// GetTableSchema 应标记 AutoIncrement（否则 SQLite→MySQL 丢失自增）
+func TestRowidAliasAutoIncrement(t *testing.T) {
+	ctx := context.Background()
+	a := newTestAdapter(t)
+
+	// ① 列约束写法
+	if err := a.ExecContext(ctx,
+		`CREATE TABLE t1 (id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'x')`); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	s1, err := a.GetTableSchema(ctx, "t1")
+	if err != nil {
+		t.Fatalf("读结构失败: %v", err)
+	}
+	if !s1.Columns[0].AutoIncrement {
+		t.Error("INTEGER PRIMARY KEY 应识别为 AutoIncrement")
+	}
+	if s1.Columns[0].Nullable {
+		t.Error("rowid 别名列应为 NOT NULL")
+	}
+
+	// ② 表约束写法（单列 PK 同样是 rowid 别名）
+	if err := a.ExecContext(ctx,
+		`CREATE TABLE t2 (id INTEGER, code TEXT, PRIMARY KEY (id))`); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	s2, err := a.GetTableSchema(ctx, "t2")
+	if err != nil {
+		t.Fatalf("读结构失败: %v", err)
+	}
+	if !s2.Columns[0].AutoIncrement {
+		t.Error("单列 INTEGER 表约束主键也应识别为 AutoIncrement")
+	}
+
+	// ③ 非 INTEGER 主键不是 rowid 别名
+	if err := a.ExecContext(ctx,
+		`CREATE TABLE t3 (id TEXT PRIMARY KEY, name TEXT)`); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	s3, err := a.GetTableSchema(ctx, "t3")
+	if err != nil {
+		t.Fatalf("读结构失败: %v", err)
+	}
+	if s3.Columns[0].AutoIncrement {
+		t.Error("TEXT PRIMARY KEY 不应标记 AutoIncrement")
+	}
+
+	// ④ 复合主键不是 rowid 别名
+	if err := a.ExecContext(ctx,
+		`CREATE TABLE t4 (sku TEXT, wh TEXT, qty INTEGER, PRIMARY KEY (sku, wh))`); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	s4, err := a.GetTableSchema(ctx, "t4")
+	if err != nil {
+		t.Fatalf("读结构失败: %v", err)
+	}
+	for _, c := range s4.Columns {
+		if c.AutoIncrement {
+			t.Errorf("复合主键列 %s 不应标记 AutoIncrement", c.Name)
+		}
+	}
+}
+
+// TestSecondaryIndexesAndTemporalInference 二级索引读取（PRAGMA index_list 5 列兼容）
+// 与 TEXT 列时间类型采样推断
+func TestSecondaryIndexesAndTemporalInference(t *testing.T) {
+	ctx := context.Background()
+	a := newTestAdapter(t)
+
+	if err := a.ExecContext(ctx, `CREATE TABLE t (id INTEGER PRIMARY KEY, email TEXT, created_at TEXT, note TEXT)`); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	if err := a.ExecContext(ctx, `CREATE UNIQUE INDEX email ON t (email)`); err != nil {
+		t.Fatalf("建索引失败: %v", err)
+	}
+	if err := a.ExecContext(ctx, `INSERT INTO t (email, created_at, note) VALUES ('a@x.com', '2026-08-30 10:00:00', 'text'), ('b@x.com', '2026-08-30 11:00:00', NULL)`); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+
+	s, err := a.GetTableSchema(ctx, "t")
+	if err != nil {
+		t.Fatalf("读结构失败: %v", err)
+	}
+
+	// 二级索引：应读到 email UNIQUE（列数不匹配曾导致全部静默丢失）
+	var foundEmail bool
+	for _, idx := range s.Indexes {
+		if idx.Name == "email" {
+			foundEmail = true
+			if !idx.IsUnique {
+				t.Error("email 索引应为 UNIQUE")
+			}
+			if len(idx.Columns) != 1 || idx.Columns[0] != "email" {
+				t.Errorf("email 索引列错误: %v", idx.Columns)
+			}
+		}
+	}
+	if !foundEmail {
+		t.Error("未读到二级索引 email")
+	}
+
+	// 时间采样：created_at 全部样本都是 datetime → 推断为 DATETIME；email/note 保持 TEXT
+	for _, c := range s.Columns {
+		switch c.Name {
+		case "created_at":
+			if c.BaseType != "DATETIME" {
+				t.Errorf("created_at 应推断为 DATETIME, got %s", c.BaseType)
+			}
+		case "email", "note":
+			if c.BaseType != "TEXT" {
+				t.Errorf("%s 应保持 TEXT, got %s", c.Name, c.BaseType)
+			}
+		}
+	}
+}

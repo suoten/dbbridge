@@ -122,6 +122,50 @@ func toSize(name string, n *int, def int) string {
 	return fmt.Sprintf("%s(%d)", name, def)
 }
 
+// goTimePattern 匹配 Go time.Time.String() 形式的字符串：
+// 如 "2026-08-30 16:35:31 +0000 UTC"、"2026-08-30 16:35:31.123 +0800 CST m=+0.001"。
+// SQLite 驱动直写 time.Time 时会以此形式落入 TEXT 列，目标库无法解析。
+var goTimePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) [+-]\d{4} [A-Z]+(?: m=[+-][\d.]+)?$`)
+
+// sqlDatetimePattern 匹配标准 SQL datetime 字符串（如 2026-08-30 16:35:31）
+var sqlDatetimePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$`)
+
+// LooksLikeDateTime 判断字符串是否为常见 datetime 形态
+// （标准 SQL 格式或 Go time.Time 字符串形式），用于从无类型信息的数据源推断时间列
+func LooksLikeDateTime(v string) bool {
+	return sqlDatetimePattern.MatchString(v) || goTimePattern.MatchString(v)
+}
+
+// NormalizeTimeValue 将 Go 时间字符串形式规范化为标准 SQL datetime 格式（如
+// "2026-08-30 16:35:31 +0000 UTC" → "2026-08-30 16:35:31"）。
+// 第二个返回值标识是否发生了转换；非时间字符串原样返回。
+func NormalizeTimeValue(v string) (string, bool) {
+	m := goTimePattern.FindStringSubmatch(v)
+	if m == nil {
+		return v, false
+	}
+	return m[1], true
+}
+
+// temporalDefaultKeywords 时间类默认关键字：SQLite 将日期时间存为 TEXT，
+// 反向迁移时无法从存储类型还原，只能根据默认值语义推断原类型，
+// 避免 VARCHAR DEFAULT CURRENT_TIMESTAMP（Error 1067）。
+var temporalDefaultKeywords = map[string]bool{
+	"current_timestamp": true, "current_date": true, "current_time": true,
+	"localtime": true, "localtimestamp": true,
+	"now": true, "sysdate": true, "curdate": true, "curtime": true,
+}
+
+// needsDegrade 判断默认值是否会让 MySQL 拒绝 TEXT/BLOB/JSON 类型：
+// 无默认值、空串或 DEFAULT NULL 均合法（MySQL 允许 TEXT DEFAULT NULL），无需降级。
+func needsDegrade(col types.ColumnMeta) bool {
+	if col.DefaultValue == nil {
+		return false
+	}
+	v := strings.TrimSpace(*col.DefaultValue)
+	return v != "" && !strings.EqualFold(v, "NULL")
+}
+
 // ToMySQL 中立类型 → MySQL/MariaDB/TiDB/OceanBase/DM(兼容模式) 类型
 func ToMySQL(k Kind, col types.ColumnMeta) string {
 	switch k {
@@ -153,8 +197,21 @@ func ToMySQL(k Kind, col types.ColumnMeta) string {
 	case KindVarChar:
 		return toSize("VARCHAR", col.Length, 255)
 	case KindText:
+		// MySQL 禁止 TEXT 列带非常量默认值（Error 1101/1067）；
+		// 时间类关键字默认值说明原列是日期时间（SQLite 存为 TEXT），还原为 DATETIME；
+		// 其余非 NULL 默认值降级为可带默认值的 VARCHAR；DEFAULT NULL 合法保留 TEXT
+		if needsDegrade(col) {
+			d := strings.TrimSpace(*col.DefaultValue)
+			if temporalDefaultKeywords[strings.ToLower(strings.TrimSuffix(d, "()"))] {
+				return "DATETIME"
+			}
+			return toSize("VARCHAR", col.Length, 255)
+		}
 		return "TEXT"
 	case KindBlob:
+		if needsDegrade(col) {
+			return toSize("VARBINARY", col.Length, 255)
+		}
 		return "BLOB"
 	case KindBinary:
 		return toSize("VARBINARY", col.Length, 255)
@@ -167,6 +224,10 @@ func ToMySQL(k Kind, col types.ColumnMeta) string {
 	case KindTimestamp:
 		return "TIMESTAMP"
 	case KindJSON:
+		// 同上：JSON 列不能有非 NULL 默认值，有则降级为 VARCHAR
+		if needsDegrade(col) {
+			return toSize("VARCHAR", col.Length, 255)
+		}
 		return "JSON"
 	case KindUUID:
 		return "VARCHAR(36)"

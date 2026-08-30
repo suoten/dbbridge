@@ -1,6 +1,10 @@
 package typeconv
 
-import "testing"
+import (
+	"testing"
+
+	types "dbbridge/pkg"
+)
 
 func TestFormatDefault(t *testing.T) {
 	cases := []struct {
@@ -37,4 +41,72 @@ func TestFormatDefault(t *testing.T) {
 			t.Errorf("FormatDefault(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
+}
+
+// MySQL 禁止 TEXT/BLOB/JSON 列带非常量 DEFAULT（Error 1101/1067），
+// 需降级或语义还原（BUG-13）
+func TestToMySQLTextualWithDefault(t *testing.T) {
+	cases := []struct {
+		kind Kind
+		def  *string
+		want string
+	}{
+		{KindText, nil, "TEXT"},
+		{KindText, strPtr(""), "TEXT"},              // 空默认值 = 无默认
+		{KindText, strPtr("NULL"), "TEXT"},          // DEFAULT NULL 在 TEXT 上合法
+		{KindText, strPtr("pending"), "VARCHAR(255)"},
+		{KindText, strPtr("CURRENT_TIMESTAMP"), "DATETIME"},  // 时间语义还原
+		{KindText, strPtr("now()"), "DATETIME"},
+		{KindBlob, nil, "BLOB"},
+		{KindBlob, strPtr("NULL"), "BLOB"},
+		{KindBlob, strPtr("pending"), "VARBINARY(255)"},
+		{KindJSON, nil, "JSON"},
+		{KindJSON, strPtr("NULL"), "JSON"},
+		{KindJSON, strPtr("{}"), "VARCHAR(255)"},
+	}
+	for _, c := range cases {
+		col := types.ColumnMeta{DataType: "X", DefaultValue: c.def}
+		if got := ToMySQL(c.kind, col); got != c.want {
+			t.Errorf("ToMySQL(%s, default=%q) = %q, want %q", c.kind, ptrVal(c.def), got, c.want)
+		}
+	}
+
+	// 带长度的 TEXT 有默认值时保留长度
+	n := 128
+	col := types.ColumnMeta{Length: &n, DefaultValue: strPtr("pending")}
+	if got := ToMySQL(KindText, col); got != "VARCHAR(128)" {
+		t.Errorf("ToMySQL(KindText, len=128, default) = %q, want VARCHAR(128)", got)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// Go time.Time 字符串形式应还原为标准 datetime（SQLite time.Time 直写 TEXT 列的场景）
+func TestNormalizeTimeValue(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		changed bool
+	}{
+		{"2026-08-30 16:35:31 +0000 UTC", "2026-08-30 16:35:31", true},
+		{"2026-08-30 16:35:31.123456 +0800 CST", "2026-08-30 16:35:31.123456", true},
+		{"2026-08-30 16:35:31 +0000 UTC m=+0.001", "2026-08-30 16:35:31", true},
+		{"2026-08-30 16:35:31", "2026-08-30 16:35:31", false},
+		{"2026-08-30T16:35:31Z", "2026-08-30T16:35:31Z", false},
+		{"pending", "pending", false},
+		{"", "", false},
+	}
+	for _, c := range cases {
+		got, changed := NormalizeTimeValue(c.in)
+		if got != c.want || changed != c.changed {
+			t.Errorf("NormalizeTimeValue(%q) = (%q, %v), want (%q, %v)", c.in, got, changed, c.want, c.changed)
+		}
+	}
+}
+
+func ptrVal(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
 }
