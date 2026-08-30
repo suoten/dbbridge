@@ -60,6 +60,42 @@
 | pgloader | 只支持 PG 方向，无图形界面 |
 | AWS DMS | 云服务，要求源库在线，不支持离线文件 |
 | Flyway/Liquibase | 是数据库版本管理工具，不做异构迁移 |
+| **DBSwitch (dbswitch)** | **Java 后端 + Web 前端，需部署服务端；不支持 SQL 文件输入；无桌面单文件体验** |
+
+### 1A.1.1 与 DBSwitch (dromara/dbswitch) 的深度对比
+
+> DBSwitch 是 dromara 开源社区的一款异构数据库迁移同步工具，Gitee Star 2.4K+，是目前国内最知名的同类型开源项目。以下是与 DBBridge 的详细对比：
+
+| 对比维度 | DBSwitch | DBBridge |
+|----------|----------|----------|
+| **技术栈** | Java (Spring Boot + Quartz) + Vue2 前端 | Go (Wails) + Vue3 前端 |
+| **部署形态** | 服务端部署（需 JVM + MySQL/PG 存储元数据） | 桌面单文件（无需安装 JVM，零依赖） |
+| **交付产物** | Docker 镜像 / WAR 包 + 前端静态资源 | Windows .exe / Linux binary / macOS .app |
+| **使用门槛** | 中高（需部署服务、配置数据库、理解任务调度） | 极低（双击运行，5 分钟上手） |
+| **SQL 文件输入** | ❌ 不支持，只支持在线直连模式 | ✅ 核心特性，支持离线 SQL 备份文件解析 |
+| **增量同步** | ✅ 支持增量字段标识同步 | ❌ Phase 1 不支持（Phase 3 计划中） |
+| **变化量同步 (CDC)** | ✅ 支持有主键表的变化量计算 | ❌ 暂不支持 |
+| **定时调度** | ✅ 内置 Quartz 调度，支持周期任务 | ❌ 桌面工具定位，不支持后台常驻调度 |
+| **数据库覆盖** | 20+ 种（含 Hive/ES/MongoDB/Kafka 等大数据源） | 10 种关系型数据库（Phase 2） |
+| **图形界面** | Web 管理台（Vue2） | 原生桌面 GUI（Vue3 + Wails） |
+| **国产数据库** | 达梦/金仓/openGauss/highgo/oscar/gbase | 达梦/金仓/openGauss |
+| **协议** | GPLv3 | AGPLv3 |
+| **目标用户** | 运维团队 / DBA / 企业级场景 | 个人开发者 / 中小团队 / 信创场景 |
+| **备份与回滚** | ❌ 无独立备份回滚机制 | ✅ 迁移前自动备份 + 独立回滚菜单 |
+
+### 1A.1.2 可从 DBSwitch 借鉴的设计
+
+1. **方言抽象层设计**：DBSwitch 的 `dbswitch-product` 模块化方言实现值得借鉴，DBBridge 已采用类似的 `internal/adapter/<dbtype>` 结构。
+2. **增量同步思路**：基于增量标识字段的增量同步是 DBSwitch 的核心亮点，值得在 Phase 3 中参考实现。
+3. **调度能力规划**：DBSwitch 内置 Quartz 实现周期调度，DBBridge 的 Linux 无头模式可参考其 Web 管理界面思路。
+4. **数据库方言测试**：DBSwitch 维护了大量的方言转换测试用例，值得参考其类型映射矩阵。
+
+### 1A.1.3 DBBridge 的差异化优势
+
+1. **桌面单文件 vs 服务端部署**：DBBridge 是桌面工具，双击即用；DBSwitch 需要部署服务端 + JVM + 元数据库。
+2. **SQL 文件输入**：DBBridge 支持 `.sql` 文件作为源，覆盖离线/归档场景；DBSwitch 不支持。
+3. **备份与回滚**：DBBridge 内置迁移前自动备份 + 独立回滚菜单，操作安全有保障；DBSwitch 无此机制。
+4. **开发者友好**：DBBridge 面向个人开发者，零配置；DBSwitch 面向运维团队，配置复杂。
 
 **"SQL 文件作为输入源 + 图形化 + 多数据库方言转换"这个交叉点，目前是空的。**
 
@@ -789,26 +825,75 @@ type DatabaseAdapter interface {
 
 | 阶段 | 时间 | 目标 | 交付内容 |
 |------|------|------|----------|
-| Phase 0: 技术验证 | 2026-09-01 ~ 09-14 (2周) | 验证核心流程可行性 | MySQL ↔ SQLite 命令行原型，支持结构+数据迁移；SQL文件解析原型 |
-| Phase 1: MVP 核心 | 2026-09-15 ~ 11-15 (8周) | 完成核心适配器与GUI基本功能 | 支持 MySQL ↔ PostgreSQL ↔ SQLite ↔ OceanBase ↔ MariaDB；支持 SQL文件导入（MySQL->目标）；完整GUI |
-| Phase 2: 社区版发布 | 2026-11-16 ~ 12-15 (4周) | 开源发布，完善文档 | GitHub 仓库，README，快速上手文档，第一个稳定版发布 |
-| Phase 3: 功能增强 | 2026-12-16 ~ 2027-02-15 (8周) | 增加高级功能 | 增量迁移、过滤、数据预览、命令行模式、报告导出、更多SQL方言解析 |
-| Phase 4: 商业版发布 | 2027-02-16 ~ 2027-03-31 (6周) | 增加商业数据库支持，上线付费服务 | 支持 Oracle/SQL Server/达梦/金仓，官网商店，支付系统 |
+| Phase 0: 技术验证 | 2026-09-01 ~ 09-14 (2周) | 验证核心流程可行性 | MySQL ↔ SQLite 命令行原型，支持结构+数据迁移；SQL文件解析原型 | ✅ 已完成 |
+| Phase 1: MVP 核心 | 2026-09-15 ~ 11-15 (8周) | 完成核心适配器与GUI基本功能 | 支持 MySQL ↔ PostgreSQL ↔ SQLite ↔ OceanBase ↔ MariaDB ↔ TiDB ↔ openGauss ↔ 达梦 ↔ 金仓 ↔ CockroachDB；支持 SQL文件导入（MySQL->目标）；完整GUI；备份与回滚机制 | ✅ 已完成 |
+| Phase 2: 社区版发布 | 2026-11-16 ~ 12-15 (4周) | 开源发布，完善文档 | GitHub 仓库，README，快速上手文档，多平台打包（Windows .exe / Linux 二进制），第一个稳定版发布 | 🔜 进行中 |
+| Phase 3: 功能增强 | 2026-12-16 ~ 2027-02-15 (8周) | 增加高级功能 | 增量迁移、过滤、数据预览、命令行模式、报告导出、更多SQL方言解析 | ⬜ |
+| Phase 4: 商业版发布 | 2027-02-16 ~ 2027-03-31 (6周) | 增加商业数据库支持，上线付费服务 | 支持 Oracle/SQL Server/Db2，官网商店，支付系统 | ⬜ |
 | Phase 5: 生态扩展 | 2027-04-01 ~ 2027-06-30 | 支持 NoSQL 及更多数据库 | MongoDB/Redis/Cassandra/InfluxDB/Neo4j等适配器 |
 | 持续迭代 | 2027-07 起 | 社区反馈，修复，优化 | 持续更新，扩大用户群 |
+
+### 7.1 打包与部署方式
+
+> DBBridge 基于 Wails (Go + Vue3) 构建，支持多平台打包，**单文件可执行，零依赖安装**。
+
+#### Windows 平台
+
+- **打包命令**：`wails build -platform windows/amd64`
+- **产物**：`build/bin/DBBridge.exe`，单文件可执行程序
+- **特性**：原生窗口，系统集成（托盘、通知），无需安装运行时，双击即可运行
+- **安装包**：可选使用 NSIS 生成安装包（`build/windows/installer/`），支持开始菜单快捷方式、卸载程序
+- **文件大小**：约 15-25 MB（含所有依赖和前端资源）
+- **兼容性**：Windows 10/11 amd64，未来可增加 arm64 支持
+
+#### Linux 平台
+
+- **打包命令**：`wails build -platform linux/amd64`
+- **产物**：`build/bin/DBBridge`，单文件可执行程序
+- **运行方式**：
+  - **桌面模式**：在有图形界面的 Linux 上，直接运行 `./DBBridge` 打开原生窗口（依赖 webkit2gtk）
+  - **服务器/无头模式**：在无图形界面的服务器上，通过 `DBBridge --headless` 启动 Web 服务模式（计划在 Phase 3 实现），浏览器访问 `http://localhost:8080` 操作迁移
+- **依赖**：桌面模式需要 `libwebkit2gtk-4.1`（大多数 Linux 发行版自带）；Web 模式无额外依赖
+- **安装方式**：直接下载二进制文件 `chmod +x DBBridge && ./DBBridge`，或通过 `.deb`/`.rpm` 包安装
+- **文件大小**：约 15-25 MB
+- **兼容性**：Ubuntu 20.04+/CentOS 8+/Debian 11+ amd64
+
+#### macOS 平台
+
+- **打包命令**：`wails build -platform darwin/universal`
+- **产物**：`build/bin/DBBridge.app`，标准 macOS 应用程序包
+- **特性**：Universal Binary（同时支持 Intel 和 Apple Silicon），原生 macOS 窗口体验
+- **安装方式**：拖入 `Applications` 文件夹即可
+
+#### 跨平台构建矩阵
+
+| 平台 | 产物格式 | 架构 | 运行模式 |
+|------|----------|------|----------|
+| Windows | `DBBridge.exe` | amd64 | 桌面窗口 |
+| Linux | `DBBridge` | amd64 | 桌面窗口 / Web 服务 |
+| macOS | `DBBridge.app` | universal | 桌面窗口 |
+
+> **注意**：Wails 桌面模式在所有平台上都提供统一的图形界面体验。Linux 服务器上的 Web 服务模式是 Phase 3 的计划功能，允许在无图形界面的远程服务器上通过浏览器操作 DBBridge。
+
+#### CI/CD 自动构建
+
+- 使用 GitHub Actions 自动构建多平台二进制
+- 每次 Release 自动生成 Windows .exe、Linux 二进制、macOS .app
+- 提供 SHA256 校验文件，确保下载完整性
+- 未来使用 GoReleaser 统一管理发布流程
 ## 八、商业模式与定价
 采用 "开源核心 + 商业增值" 模式，确保项目可持续。
 
 ### 8.1 开源社区版 (AGPLv3) —— 永久免费
-- 支持 MySQL、PostgreSQL、SQLite、MariaDB、OceanBase 互转。
+- 支持 MySQL、PostgreSQL、SQLite、MariaDB、OceanBase、TiDB、openGauss、达梦 DM、金仓 KingbaseES、CockroachDB 互转。
 - 支持 SQL 文件导入（MySQL 方言 → 上述目标库）。
-- 全量结构+数据迁移，基础GUI，日志查看。
+- 全量结构+数据迁移，基础GUI，日志查看，备份与回滚。
 - 社区支持（GitHub Issues）。
 
 ### 8.2 专业版 (Pro) —— 按年/永久授权
 
 **额外功能**：
-- 支持 Oracle、SQL Server、Db2、达梦、金仓、TiDB。
+- 支持 Oracle、SQL Server、Db2（达梦、金仓、TiDB 已在社区版中支持）。
 - 支持更多 SQL 方言解析（Oracle、SQL Server 等）。
 - 增量迁移、数据过滤、数据预览。
 - 命令行批处理模式（无需GUI，适合自动化）。
@@ -1013,11 +1098,16 @@ DBBridge/
 ├── internal/                     # 内部包
 │   ├── adapter/                  # 数据库适配器
 │   │   ├── mysql/                # MySQL 适配器
-│   │   ├── postgres/              # PostgreSQL 适配器
+│   │   ├── postgres/             # PostgreSQL 适配器
 │   │   ├── sqlite/               # SQLite 适配器
 │   │   ├── mariadb/              # MariaDB 适配器
 │   │   ├── oceanbase/            # OceanBase 适配器
-│   │   └── ...                   # 其他适配器
+│   │   ├── tidb/                 # TiDB 适配器
+│   │   ├── opengauss/            # openGauss 适配器
+│   │   ├── dameng/               # 达梦 DM 适配器
+│   │   ├── kingbase/             # 人大金仓 KingbaseES 适配器
+│   │   ├── cockroachdb/          # CockroachDB 适配器
+│   │   └── ...                   # 其他适配器（Oracle/SQL Server 等待实现）
 │   ├── parser/                   # SQL 文件解析器
 │   │   ├── lexer.go              # 词法分析器
 │   │   ├── parser.go             # 语法分析器
