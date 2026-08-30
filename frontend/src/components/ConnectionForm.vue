@@ -87,6 +87,12 @@ function update(field: keyof ConnectionConfig, value: any) {
     } else if (['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(value)) {
       newConfig.port = 5432
     }
+    // SQLite 用文件路径，其他数据库用库名，语义不同，切换时清空避免残留（如 :memory:）
+    const wasSQLite = props.modelValue.type === 'sqlite'
+    const nowSQLite = value === 'sqlite'
+    if (wasSQLite !== nowSQLite) {
+      newConfig.database = ''
+    }
   }
   emit('update:modelValue', newConfig)
 }

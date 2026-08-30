@@ -309,7 +309,8 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		return report, fmt.Errorf("迁移已取消")
 	}
 
-	o.reportProgress(ctx, "done", "", 0, 0)
+	// done 事件必须携带真实累计行数（report.TotalRows 已在上方汇总），否则前端进度条归零
+	o.reportProgress(ctx, "done", "", report.TotalRows, report.TotalRows)
 	o.log("INFO", "", fmt.Sprintf("迁移完成！成功: %d, 失败: %d, 耗时: %s",
 		report.TablesSuccess, report.TablesFailed, report.Duration))
 

@@ -36,9 +36,10 @@ const message = ref<{ type: 'success' | 'error' | 'info'; text: string } | null>
 const hasBackups = computed(() => backups.value.length > 0)
 const selectedBackups = computed(() => backups.value.filter(b => b.selected))
 
-async function loadBackups() {
+async function loadBackups(keepMsg = false) {
   loading.value = true
-  message.value = null
+  // keepMsg：回滚/删除后刷新列表时保留操作结果提示，否则成功提示会被清空
+  if (!keepMsg) message.value = null
   try {
     // @ts-ignore - Wails binding
     const result = await window.go.main.App.GetBackupTables(props.targetConfig)
@@ -82,7 +83,7 @@ async function restoreOne(backup: BackupItem) {
         text: `已回滚: ${backup.originalName}（从 ${backup.backupName} 恢复）`,
       }
       emit('restored', backup.originalName)
-      await loadBackups()
+      await loadBackups(true)
     } else {
       message.value = { type: 'error', text: result.error || '回滚失败' }
     }
@@ -119,7 +120,7 @@ async function restoreSelected() {
     for (const b of selectedBackups.value) {
       emit('restored', b.originalName)
     }
-    await loadBackups()
+    await loadBackups(true)
   } catch (e: any) {
     message.value = { type: 'error', text: e?.message || String(e) }
   } finally {
@@ -142,7 +143,7 @@ async function deleteOne(backup: BackupItem) {
         type: 'success',
         text: `已删除备份表: ${backup.backupName}`,
       }
-      await loadBackups()
+      await loadBackups(true)
     } else {
       message.value = { type: 'error', text: result.error || '删除失败' }
     }
@@ -176,7 +177,7 @@ onMounted(() => {
         <span>备份与回滚</span>
         <span class="bm-count" v-if="backups.length > 0">{{ backups.length }} 个备份</span>
       </div>
-      <button class="btn btn-ghost btn-sm" @click="loadBackups" :disabled="loading">
+      <button class="btn btn-ghost btn-sm" @click="loadBackups()" :disabled="loading">
         <Loader2 v-if="loading" :size="14" class="animate-spin" />
         <RefreshCw v-else :size="14" />
         刷新

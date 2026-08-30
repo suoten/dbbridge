@@ -282,7 +282,9 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		}
 
 		if col.DefaultValue != nil && *col.DefaultValue != "" {
-			sb.WriteString(fmt.Sprintf(" DEFAULT %s", *col.DefaultValue))
+			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
+				sb.WriteString(" DEFAULT " + quoted)
+			}
 		}
 	}
 

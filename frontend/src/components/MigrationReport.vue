@@ -153,7 +153,7 @@ function getStatus(s: string) {
               <Archive :size="12" />
               {{ t.backupTable }}
             </span>
-            <span class="meta-error" v-if="t.error && !t.rolledBack">
+            <span class="meta-error" v-if="t.error && !t.rolledBack" :title="t.error">
               <AlertCircle :size="12" />
               {{ t.error }}
             </span>

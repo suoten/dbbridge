@@ -55,6 +55,7 @@ const targetTested = ref(false)
 
 const tables = ref<{ name: string; comment?: string; selected: boolean }[]>([])
 const loadingTables = ref(false)
+const tablesError = ref('')
 const tableSearch = ref('')
 
 const filteredTables = computed(() => {
@@ -80,6 +81,7 @@ const selectedTables = computed(() => tables.value.filter(t => t.selected).map(t
 
 async function loadTables() {
   loadingTables.value = true
+  tablesError.value = ''
   try {
     // @ts-ignore - Wails binding
     const result = await window.go.main.App.GetTables(sourceConfig.value)
@@ -89,9 +91,14 @@ async function loadTables() {
         comment: t.comment,
         selected: true,
       }))
+    } else {
+      // 静默失败会让用户误以为库里没有表，必须展示错误
+      tablesError.value = result.error || '加载表列表失败，请检查源库连接'
+      tables.value = []
     }
-  } catch (e) {
-    console.error(e)
+  } catch (e: any) {
+    tablesError.value = e?.message || String(e)
+    tables.value = []
   } finally {
     loadingTables.value = false
   }
@@ -370,7 +377,8 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
               </div>
               <div v-else class="empty-state">
                 <Database :size="40" class="empty-icon" />
-                <p v-if="tables.length === 0">点击"刷新"加载源数据库的表</p>
+                <p v-if="tablesError" class="empty-error">{{ tablesError }}</p>
+                <p v-else-if="tables.length === 0">点击"刷新"加载源数据库的表</p>
                 <p v-else>没有匹配 "{{ tableSearch }}" 的表</p>
               </div>
             </div>
@@ -494,6 +502,8 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
 <style scoped>
 .app {
   display: flex;
+  /* #app 是 flex 容器，根节点必须占满宽度，否则收缩为内容宽导致右侧留白 */
+  width: 100%;
   height: 100vh;
   height: 100dvh;
   overflow: hidden;
@@ -946,6 +956,14 @@ padding: 8px 4px 4px;
   margin-bottom: 12px;
 }
 
+.empty-error {
+  color: var(--color-danger);
+  font-size: 13px;
+  max-width: 480px;
+  margin: 0 auto;
+  word-break: break-all;
+}
+
 /* ====== Options Card ====== */
 .options-card {
   padding: 16px 20px;
@@ -1044,8 +1062,11 @@ padding: 8px 4px 4px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  height: 100%;
-  max-height: calc(100vh - 120px);
+  /* content-area 是 row flex，默认 align-items:stretch 会把本容器锁死为一屏固定高度，
+     报告出现后进度面板会被 flex 压缩（日志归零、完成横条被报告盖住）。
+     改为脱离拉伸按内容增高，min-height 保底占满一屏，超出由 content-area 滚动 */
+  align-self: flex-start;
+  min-height: 100%;
 }
 
 .report-wrapper {
@@ -1222,7 +1243,7 @@ padding: 8px 4px 4px;
   }
 
   .migrate-step {
-    max-height: none;
+    min-height: 0;
   }
 
   .table-list {

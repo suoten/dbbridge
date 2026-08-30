@@ -6,7 +6,7 @@ import {types} from '../models';
 
 export function CancelMigration():Promise<boolean>;
 
-export function DeleteBackup(arg1:main.ConnectionRequest,arg2:string):Promise<main.SimpleResult>;
+export function DeleteBackup(arg1:main.RestoreRequest):Promise<main.SimpleResult>;
 
 export function DeleteMigrationHistory(arg1:number):Promise<main.SimpleResult>;
 
@@ -20,9 +20,9 @@ export function GetTableSchema(arg1:main.ConnectionRequest,arg2:string):Promise<
 
 export function GetTables(arg1:main.ConnectionRequest):Promise<main.GetTablesResult>;
 
-export function RestoreAllTables(arg1:main.ConnectionRequest,arg2:Array<string>):Promise<main.RestoreAllResult>;
+export function RestoreAllTables(arg1:main.RestoreRequest):Promise<main.RestoreAllResult>;
 
-export function RestoreTable(arg1:main.ConnectionRequest,arg2:string):Promise<main.RestoreTableResult>;
+export function RestoreTable(arg1:main.RestoreRequest):Promise<main.RestoreTableResult>;
 
 export function StartMigration(arg1:main.StartMigrationRequest):Promise<types.MigrationReport>;
 

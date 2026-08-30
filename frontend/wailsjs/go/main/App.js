@@ -6,8 +6,8 @@ export function CancelMigration() {
   return window['go']['main']['App']['CancelMigration']();
 }
 
-export function DeleteBackup(arg1, arg2) {
-  return window['go']['main']['App']['DeleteBackup'](arg1, arg2);
+export function DeleteBackup(arg1) {
+  return window['go']['main']['App']['DeleteBackup'](arg1);
 }
 
 export function DeleteMigrationHistory(arg1) {
@@ -34,12 +34,12 @@ export function GetTables(arg1) {
   return window['go']['main']['App']['GetTables'](arg1);
 }
 
-export function RestoreAllTables(arg1, arg2) {
-  return window['go']['main']['App']['RestoreAllTables'](arg1, arg2);
+export function RestoreAllTables(arg1) {
+  return window['go']['main']['App']['RestoreAllTables'](arg1);
 }
 
-export function RestoreTable(arg1, arg2) {
-  return window['go']['main']['App']['RestoreTable'](arg1, arg2);
+export function RestoreTable(arg1) {
+  return window['go']['main']['App']['RestoreTable'](arg1);
 }
 
 export function StartMigration(arg1) {

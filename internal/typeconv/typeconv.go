@@ -6,9 +6,39 @@ package typeconv
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	types "dbbridge/pkg"
 )
+
+// defaultNumericPattern 匹配纯数值字面量（整数/小数/负数），可直接嵌入 DEFAULT 子句
+var defaultNumericPattern = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
+
+// FormatDefault 将 information_schema 中读出的列默认值格式化为可直接嵌入 DDL 的字面量。
+// 规则：数值字面量与常见 SQL 函数/关键字（CURRENT_TIMESTAMP、NULL 等）原样返回；
+// 已带引号的值原样返回（PG/SQLite 元数据可能带 ::type 后缀）；
+// 其余一律按字符串字面量加单引号并转义，避免生成 "DEFAULT pending" 这类非法 SQL。
+func FormatDefault(val string) string {
+	v := strings.TrimSpace(val)
+	if v == "" {
+		return ""
+	}
+	if defaultNumericPattern.MatchString(v) {
+		return v
+	}
+	key := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(v, "()")))
+	switch key {
+	case "current_timestamp", "current_date", "current_time", "localtime", "localtimestamp",
+		"now", "uuid", "gen_random_uuid", "sysdate", "curdate", "curtime", "rand", "random",
+		"null", "true", "false":
+		return v
+	}
+	if strings.HasPrefix(v, "'") {
+		return v
+	}
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
 
 // Kind 中立类型
 type Kind string

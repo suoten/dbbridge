@@ -326,14 +326,21 @@ type RestoreTableResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// RestoreRequest 回滚/删除备份请求（前端统一传单个对象）
+type RestoreRequest struct {
+	Connection  ConnectionRequest `json:"connection"`
+	BackupName  string            `json:"backupName,omitempty"`
+	BackupNames []string          `json:"backupNames,omitempty"`
+}
+
 // RestoreTable 从备份恢复单张表
 // 注意：会删除当前同名表并将备份表重命名回原表名（丢弃迁移写入的新数据）
-func (a *App) RestoreTable(req ConnectionRequest, backupName string) RestoreTableResult {
-	originalName, err := a.backupService.RestoreTable(context.Background(), toConfig(req), backupName)
+func (a *App) RestoreTable(req RestoreRequest) RestoreTableResult {
+	originalName, err := a.backupService.RestoreTable(context.Background(), toConfig(req.Connection), req.BackupName)
 	if err != nil {
-		return RestoreTableResult{Success: false, BackupName: backupName, Error: err.Error()}
+		return RestoreTableResult{Success: false, BackupName: req.BackupName, Error: err.Error()}
 	}
-	return RestoreTableResult{Success: true, BackupName: backupName, Original: originalName}
+	return RestoreTableResult{Success: true, BackupName: req.BackupName, Original: originalName}
 }
 
 // RestoreAllResult 批量回滚结果
@@ -344,8 +351,8 @@ type RestoreAllResult struct {
 }
 
 // RestoreAllTables 批量从备份恢复多张表
-func (a *App) RestoreAllTables(req ConnectionRequest, backupNames []string) RestoreAllResult {
-	r := a.backupService.RestoreAllTables(context.Background(), toConfig(req), backupNames)
+func (a *App) RestoreAllTables(req RestoreRequest) RestoreAllResult {
+	r := a.backupService.RestoreAllTables(context.Background(), toConfig(req.Connection), req.BackupNames)
 	return RestoreAllResult{
 		SuccessCount: r.SuccessCount,
 		FailedCount:  r.FailedCount,
@@ -354,8 +361,8 @@ func (a *App) RestoreAllTables(req ConnectionRequest, backupNames []string) Rest
 }
 
 // DeleteBackup 删除一个备份表（确认迁移无误后清理）
-func (a *App) DeleteBackup(req ConnectionRequest, backupName string) SimpleResult {
-	if err := a.backupService.DeleteBackup(context.Background(), toConfig(req), backupName); err != nil {
+func (a *App) DeleteBackup(req RestoreRequest) SimpleResult {
+	if err := a.backupService.DeleteBackup(context.Background(), toConfig(req.Connection), req.BackupName); err != nil {
 		return SimpleResult{Success: false, Error: err.Error()}
 	}
 	return SimpleResult{Success: true}

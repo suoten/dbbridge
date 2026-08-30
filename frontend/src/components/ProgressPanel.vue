@@ -430,7 +430,7 @@ function logColor(level: string): string {
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  min-height: 220px; /* 报告出现时保底高度，避免日志区被压缩到不可见 */
   overflow: hidden;
 }
 
