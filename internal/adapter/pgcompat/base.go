@@ -12,9 +12,10 @@ import (
 	"strings"
 	"time"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/typeconv"
+	types "dbbridge/pkg"
 
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 )
 
@@ -98,7 +99,7 @@ func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 		commentExpr = `''`
 	}
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT table_name, ` + commentExpr + `
+		SELECT table_name, `+commentExpr+`
 		FROM information_schema.tables
 		WHERE table_schema = 'public'
 		AND table_type = 'BASE TABLE'
@@ -285,7 +286,8 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 			var idxName string
 			var colArray []string
 			var isUnique bool
-			if err := idxRows.Scan(&idxName, &colArray, &isUnique); err != nil {
+			// lib/pq 不能直接 Scan text[] 到 []string，需 pq.Array 包装，否则索引静默丢失
+			if err := idxRows.Scan(&idxName, pq.Array(&colArray), &isUnique); err != nil {
 				continue
 			}
 			schema.Indexes = append(schema.Indexes, types.IndexMeta{

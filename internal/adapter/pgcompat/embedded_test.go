@@ -41,16 +41,25 @@ func TestEmbeddedPGE2E(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	// Windows 用户目录常含中文，initdb 的 UTF8 编码无法处理 GBK 路径，
+	// 必须用纯 ASCII 运行目录（测试结束后清理）
+	runtimePath := filepath.Join(os.Getenv("ProgramData"), "DBBridgeEmbeddedPGTest")
+	_ = os.RemoveAll(runtimePath)
+
 	ep := embeddedpostgres.NewDatabase(embeddedpostgres.DefaultConfig().
 		Username("postgres").
 		Password("pgpass").
 		Database("dbbridge_e2e").
 		Port(54329).
-		RuntimePath(filepath.Join(t.TempDir(), "pg")))
+		Locale("C").
+		RuntimePath(runtimePath))
 	if err := ep.Start(); err != nil {
 		t.Fatalf("启动嵌入式 PG 失败: %v", err)
 	}
-	defer ep.Stop()
+	defer func() {
+		_ = ep.Stop()
+		_ = os.RemoveAll(runtimePath)
+	}()
 
 	pg := New("postgres")
 	if err := pg.Connect(ctx, types.ConnectionConfig{
@@ -147,8 +156,9 @@ func TestEmbeddedPGE2E(t *testing.T) {
 			t.Error("SQLite INTEGER PRIMARY KEY → PG 应为 SERIAL（AutoIncrement）")
 		}
 		if c.Name == "status" {
-			if c.DefaultValue == nil || *c.DefaultValue != "pending" {
-				t.Errorf("PG status 默认值 = %v, want 'pending'", c.DefaultValue)
+			// PG column_default 按约定保留字符串引号（'pending'），FormatDefault 可原样透传
+			if c.DefaultValue == nil || *c.DefaultValue != "'pending'" {
+				t.Errorf("PG status 默认值 = %v, want 'pending'（带引号）", c.DefaultValue)
 			}
 		}
 	}
