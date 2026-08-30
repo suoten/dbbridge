@@ -10,6 +10,12 @@
   <img src="https://img.shields.io/badge/平台-Windows%20%7C%20macOS%20%7C%20Linux-success" alt="Platform">
 </p>
 
+<p align="center">
+  <a href="https://github.com/suoten/dbbridge/stargazers"><img src="https://img.shields.io/github/stars/suoten/dbbridge?style=social" alt="GitHub Stars"></a>
+  <a href="https://gitee.com/suoten/dbbridge/stargazers"><img src="https://gitee.com/suoten/dbbridge/badge/star.svg?theme=dark" alt="Gitee Stars"></a>
+  <a href="https://github.com/suoten/dbbridge/releases"><img src="https://img.shields.io/github/v/release/suoten/dbbridge" alt="GitHub Release"></a>
+</p>
+
 # DBBridge — 数据库迁移工具
 
 > **填好连接信息，点击"开始迁移"，5 分钟搞定异构数据库迁移。**
