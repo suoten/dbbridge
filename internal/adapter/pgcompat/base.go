@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -125,6 +126,25 @@ func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 	return tables, nil
 }
 
+// normalizePGDefault 规范化 information_schema.columns.column_default：
+// PG 会在默认值后附加 ::类型 转换（如 'pending'::character varying、NULL::text、'0'::numeric），
+// 原样迁移到 MySQL 等库会语法错误；这里仅剥离字符串/字面量尾部的 ::类型 后缀。
+func normalizePGDefault(def string) string {
+	v := strings.TrimSpace(def)
+	i := strings.Index(v, "::")
+	if i < 0 {
+		return v
+	}
+	left := strings.TrimSpace(v[:i])
+	if strings.HasPrefix(left, "'") || strings.EqualFold(left, "NULL") || pgNumericPattern.MatchString(left) {
+		return left
+	}
+	// 函数式默认值（如 now()::timestamp）保留原样
+	return v
+}
+
+var pgNumericPattern = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
+
 // GetTableSchema 获取表结构
 func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{
@@ -160,9 +180,9 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 	for rows.Next() {
 		var name, dataType, nullable string
 		var defVal sql.NullString
-		var maxLen, numPrecision, numScale sql.NullInt64
+		var maxLen, numPrecision, numScale, ordinal sql.NullInt64
 
-		if err := rows.Scan(&name, &dataType, &maxLen, &numPrecision, &numScale, &nullable, &defVal); err != nil {
+		if err := rows.Scan(&name, &dataType, &maxLen, &numPrecision, &numScale, &nullable, &defVal, &ordinal); err != nil {
 			return schema, fmt.Errorf("%s: 读取列信息失败: %w", a.brand(), err)
 		}
 
@@ -174,8 +194,10 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		}
 
 		if defVal.Valid && defVal.String != "" {
-			val := defVal.String
-			col.DefaultValue = &val
+			val := normalizePGDefault(defVal.String)
+			if val != "" {
+				col.DefaultValue = &val
+			}
 		}
 		if maxLen.Valid {
 			l := int(maxLen.Int64)
@@ -354,7 +376,7 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			sb.WriteString(" NOT NULL")
 		}
 
-		if col.DefaultValue != nil && *col.DefaultValue != "" {
+		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
 				sb.WriteString(" DEFAULT " + quoted)
 			}

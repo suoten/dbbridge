@@ -1,0 +1,54 @@
+# DBBridge systemd 服务模板
+# 实际部署时由 install.sh 自动检测内存并替换占位符后写入
+# /etc/systemd/system/dbbridge.service
+
+[Unit]
+Description=DBBridge - 数据库迁移与SQL转换工具
+Documentation=https://github.com/suoten/dbbridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/dbbridge/dbbridge --web --port 8989
+WorkingDirectory=/opt/dbbridge
+Restart=on-failure
+RestartSec=3
+
+# ====== 资源约束策略（自适应：按服务器总内存设定）======
+# 安装脚本会在部署时检测总内存，替换下面的 @@MEM_MAX@@ / @@MEM_HIGH@@ / @@GO_MEM_LIMIT@@ 占位符。
+#
+# 自适应策略：
+#   总内存 ≤ 1024MB → MemoryMax=256M, MemoryHigh=192M, GOMEMLIMIT=192MiB
+#   总内存 ≤ 2048MB → MemoryMax=384M, MemoryHigh=256M, GOMEMLIMIT=256MiB
+#   总内存 > 2048MB → MemoryMax=512M, MemoryHigh=384M, GOMEMLIMIT=384MiB
+MemoryMax=@@MEM_MAX@@
+MemoryHigh=@@MEM_HIGH@@
+Environment=GOMEMLIMIT=@@GO_MEM_LIMIT@@
+Environment=GOGC=50
+
+# CPU：低优先级（空闲时可用满，繁忙时让路给数据库）
+CPUWeight=50
+Environment=GOMAXPROCS=4
+
+# I/O：普通优先级（数据迁移需要读写）
+IOWeight=50
+LimitNOFILE=65536
+
+# OOM：内存不足时可被杀（会自动重启）
+OOMScoreAdjust=100
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/dbbridge /var/log/dbbridge /opt/dbbridge
+
+# 日志
+StandardOutput=append:/var/log/dbbridge/dbbridge.log
+StandardError=append:/var/log/dbbridge/dbbridge.log
+SyslogIdentifier=dbbridge
+
+[Install]
+WantedBy=multi-user.target

@@ -385,7 +385,7 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			sb.WriteString(" AUTO_INCREMENT")
 		}
 
-		if col.DefaultValue != nil && *col.DefaultValue != "" {
+		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
 				sb.WriteString(" DEFAULT " + quoted)
 			}
