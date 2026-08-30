@@ -1,13 +1,17 @@
+// Package sqlite 注册 SQLite 适配器（纯 Go 驱动，无需 CGO）。
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
-	"dbbridge/pkg"
+	types "dbbridge/pkg"
+	"dbbridge/internal/typeconv"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // 确保实现了接口
@@ -25,16 +29,16 @@ func init() {
 }
 
 // Connect 连接 SQLite 数据库
-// SQLite 是文件型数据库，Host 字段存储文件路径
-func (a *Adapter) Connect(config types.ConnectionConfig) error {
-	dsn := config.Database // 对于 SQLite，Database 字段就是文件路径
+// SQLite 是文件型数据库，Database 字段存储文件路径
+func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) error {
+	dsn := config.Database
 	if dsn == "" || dsn == ":memory:" {
 		dsn = ":memory:"
 	}
 	// 添加 pragma 优化
 	dsn = fmt.Sprintf("%s?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000", dsn)
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("sqlite: 打开数据库失败: %w", err)
 	}
@@ -52,9 +56,9 @@ func (a *Adapter) Close() error {
 }
 
 // GetVersion 获取 SQLite 版本
-func (a *Adapter) GetVersion() (string, error) {
+func (a *Adapter) GetVersion(ctx context.Context) (string, error) {
 	var version string
-	err := a.db.QueryRow("SELECT sqlite_version()").Scan(&version)
+	err := a.db.QueryRowContext(ctx, "SELECT sqlite_version()").Scan(&version)
 	if err != nil {
 		return "", fmt.Errorf("sqlite: 获取版本失败: %w", err)
 	}
@@ -62,11 +66,10 @@ func (a *Adapter) GetVersion() (string, error) {
 }
 
 // GetTables 获取所有表
-func (a *Adapter) GetTables() ([]types.TableMeta, error) {
-	rows, err := a.db.Query(`
-		SELECT name, COALESCE(sql, '') as sql_text
-		FROM sqlite_master
-		WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_%' 
+func (a *Adapter) GetTables(ctx context.Context) ([]types.TableMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\_%' ESCAPE '\'
 		ORDER BY name
 	`)
 	if err != nil {
@@ -76,26 +79,26 @@ func (a *Adapter) GetTables() ([]types.TableMeta, error) {
 
 	var tables []types.TableMeta
 	for rows.Next() {
-		var name, sqlText string
-		if err := rows.Scan(&name, &sqlText); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("sqlite: 读取表信息失败: %w", err)
 		}
-		// SQLite 表注释存储在 sql 文本中，这里简化处理
-		tables = append(tables, types.TableMeta{
-			Name: name,
-		})
+		tables = append(tables, types.TableMeta{Name: name})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: 遍历表列表失败: %w", err)
 	}
 	return tables, nil
 }
 
 // GetTableSchema 获取表结构
-func (a *Adapter) GetTableSchema(tableName string) (types.TableSchema, error) {
+func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{
 		Name: tableName,
 	}
 
 	// 获取列信息
-	rows, err := a.db.Query(fmt.Sprintf("PRAGMA table_info(%q)", tableName))
+	rows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", tableName))
 	if err != nil {
 		return schema, fmt.Errorf("sqlite: 获取表结构失败: %w", err)
 	}
@@ -116,21 +119,19 @@ func (a *Adapter) GetTableSchema(tableName string) (types.TableSchema, error) {
 		}
 
 		col := types.ColumnMeta{
-			Name:      name,
-			DataType:  ctype,
-			BaseType:  strings.ToUpper(strings.SplitN(ctype, "(", 2)[0]),
-			Nullable:  notnull == 0 && pk == 0,
-			Comment:   "",
+			Name:         name,
+			DataType:     ctype,
+			BaseType:     strings.ToUpper(strings.SplitN(ctype, "(", 2)[0]),
+			Nullable:     notnull == 0 && pk == 0,
 			IsPrimaryKey: pk > 0,
 		}
 
-		if dfltValue.Valid {
+		if dfltValue.Valid && dfltValue.String != "" {
 			val := dfltValue.String
 			col.DefaultValue = &val
 		}
 
 		if pk > 0 {
-			col.IsPrimaryKey = true
 			pkColumns = append(pkColumns, name)
 		}
 
@@ -162,7 +163,7 @@ func (a *Adapter) GetTableSchema(tableName string) (types.TableSchema, error) {
 	}
 
 	// 获取索引信息
-	indexRows, err := a.db.Query(fmt.Sprintf("PRAGMA index_list(%q)", tableName))
+	indexRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%q)", tableName))
 	if err == nil {
 		defer indexRows.Close()
 		for indexRows.Next() {
@@ -177,7 +178,7 @@ func (a *Adapter) GetTableSchema(tableName string) (types.TableSchema, error) {
 			}
 
 			// 获取索引列
-			idxColRows, err := a.db.Query(fmt.Sprintf("PRAGMA index_info(%q)", name))
+			idxColRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%q)", name))
 			if err != nil {
 				continue
 			}
@@ -200,29 +201,68 @@ func (a *Adapter) GetTableSchema(tableName string) (types.TableSchema, error) {
 		}
 	}
 
-	// 获取建表 SQL（用于获取表注释等额外信息）
-	var sqlText sql.NullString
-	err = a.db.QueryRow(`
-		SELECT sql FROM sqlite_master WHERE type='table' AND name=?
-	`, tableName).Scan(&sqlText)
-	if err == nil && sqlText.Valid {
-		// 可以从 SQL 中解析注释，这里简化处理
-	}
-
 	return schema, nil
 }
 
 // GetRowCount 获取表的行数
-func (a *Adapter) GetRowCount(tableName string) (int64, error) {
+func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	err := a.db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %q", tableName)).Scan(&count)
+	err := a.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %q", tableName)).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: 获取行数失败: %w", err)
 	}
 	return count, nil
 }
 
-// GenerateCreateTableDDL 生成建表 SQL
+// TableExists 检查表是否存在
+func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
+	var count int
+	err := a.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type='table' AND name=?
+	`, tableName).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("sqlite: 检查表存在失败: %w", err)
+	}
+	return count > 0, nil
+}
+
+// BackupTable 将表重命名为备份表名
+func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
+	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", tableName, backupName))
+	if err != nil {
+		return "", fmt.Errorf("sqlite: 备份表失败 (%s→%s): %w", tableName, backupName, err)
+	}
+	return backupName, nil
+}
+
+// RestoreFromBackup 从备份表恢复
+func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
+	exists, _ := a.TableExists(ctx, originalName)
+	if exists {
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", originalName))
+		if err != nil {
+			return fmt.Errorf("sqlite: 恢复备份时删除当前表失败: %w", err)
+		}
+	}
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", backupName, originalName))
+	if err != nil {
+		return fmt.Errorf("sqlite: 恢复备份失败 (%s→%s): %w", backupName, originalName, err)
+	}
+	return nil
+}
+
+// DropBackup 删除备份表
+func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", backupName))
+	if err != nil {
+		return fmt.Errorf("sqlite: 删除备份表失败: %w", err)
+	}
+	return nil
+}
+
+// GenerateCreateTableDDL 生成建表 SQL（类型经 typeconv 映射，支持异构迁移）
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %q (\n", table.Name))
@@ -241,12 +281,8 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			sb.WriteString(" NOT NULL")
 		}
 
-		if col.DefaultValue != nil {
+		if col.DefaultValue != nil && *col.DefaultValue != "" {
 			sb.WriteString(fmt.Sprintf(" DEFAULT %s", *col.DefaultValue))
-		}
-
-		if col.AutoIncrement {
-			sb.WriteString(" AUTOINCREMENT")
 		}
 	}
 
@@ -279,8 +315,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 
 	sb.WriteString("\n)")
 
-	// SQLite 不支持表级索引、外键在 CREATE TABLE 中（除列级外）
-	// 唯一索引需要单独创建
+	// 索引需要单独创建
 	for _, idx := range table.Indexes {
 		if idx.IsPrimary {
 			continue
@@ -309,49 +344,38 @@ func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
 	return fmt.Sprintf("DROP TABLE IF EXISTS %q", tableName), nil
 }
 
-// ReadData 分页读取数据
-func (a *Adapter) ReadData(tableName string, offset, limit int) ([]types.Row, error) {
-	// 先获取列名
-	schema, err := a.GetTableSchema(tableName)
+// ReadData 按偏移量分页读取数据
+func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit int) ([]types.Row, error) {
+	schema, err := a.GetTableSchema(ctx, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: 获取表结构失败: %w", err)
 	}
 
-	var cols []string
-	for _, c := range schema.Columns {
-		cols = append(cols, c.Name)
-	}
-
+	cols := schemaColumnNames(schema)
 	query := fmt.Sprintf("SELECT * FROM %q LIMIT %d OFFSET %d", tableName, limit, offset)
-	rows, err := a.db.Query(query)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: 查询数据失败: %w", err)
-	}
-	defer rows.Close()
-
-	var result []types.Row
-	for rows.Next() {
-		// 使用动态列扫描
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, fmt.Errorf("sqlite: 读取数据失败: %w", err)
-		}
-		row := make(types.Row)
-		for i, col := range cols {
-			row[col] = values[i]
-		}
-		result = append(result, row)
-	}
-
-	return result, nil
+	return a.scanRows(ctx, query, nil, cols)
 }
 
-// WriteData 批量写入数据
-func (a *Adapter) WriteData(tableName string, columns []string, rows []types.Row) error {
+// ReadDataKeyset 基于单列主键的游标分页读取
+func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn string, lastKey any, limit int) ([]types.Row, error) {
+	schema, err := a.GetTableSchema(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: 获取表结构失败: %w", err)
+	}
+
+	cols := schemaColumnNames(schema)
+	query := fmt.Sprintf("SELECT * FROM %q", tableName)
+	args := []any{}
+	if lastKey != nil {
+		args = append(args, lastKey)
+		query += fmt.Sprintf(" WHERE %q > ?", keyColumn)
+	}
+	query += fmt.Sprintf(" ORDER BY %q ASC LIMIT %d", keyColumn, limit)
+	return a.scanRows(ctx, query, args, cols)
+}
+
+// WriteData 批量写入数据（内部事务保证批次原子性）
+func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []string, rows []types.Row) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -369,12 +393,12 @@ func (a *Adapter) WriteData(tableName string, columns []string, rows []types.Row
 		strings.Join(placeholders, ", "),
 	)
 
-	tx, err := a.db.Begin()
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("sqlite: 开启事务失败: %w", err)
 	}
 
-	stmt, err := tx.Prepare(query)
+	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		tx.Rollback()
 		return fmt.Errorf("sqlite: 预处理失败: %w", err)
@@ -384,14 +408,13 @@ func (a *Adapter) WriteData(tableName string, columns []string, rows []types.Row
 	for _, row := range rows {
 		values := make([]any, len(columns))
 		for i, col := range columns {
-			val, ok := row[col]
-			if !ok {
-				values[i] = nil
-			} else {
+			if val, ok := row[col]; ok {
 				values[i] = val
+			} else {
+				values[i] = nil
 			}
 		}
-		if _, err := stmt.Exec(values...); err != nil {
+		if _, err := stmt.ExecContext(ctx, values...); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("sqlite: 写入数据失败: %w", err)
 		}
@@ -404,65 +427,53 @@ func (a *Adapter) WriteData(tableName string, columns []string, rows []types.Row
 	return nil
 }
 
-// Exec 执行原始 SQL 语句
-func (a *Adapter) Exec(sql string) error {
-	_, err := a.db.Exec(sql)
-	return err
-}
-
-// BeginTx 开启事务
-func (a *Adapter) BeginTx() error {
-	_, err := a.db.Exec("BEGIN")
-	return err
-}
-
-// CommitTx 提交事务
-func (a *Adapter) CommitTx() error {
-	_, err := a.db.Exec("COMMIT")
-	return err
-}
-
-// RollbackTx 回滚事务
-func (a *Adapter) RollbackTx() error {
-	_, err := a.db.Exec("ROLLBACK")
+// ExecContext 执行原始 SQL 语句
+func (a *Adapter) ExecContext(ctx context.Context, sqlText string) error {
+	_, err := a.db.ExecContext(ctx, sqlText)
 	return err
 }
 
 // MapType 将源数据库的列类型映射为 SQLite 类型
 func (a *Adapter) MapType(col types.ColumnMeta) string {
-	base := strings.ToUpper(col.BaseType)
-	switch base {
-	// 整数类型
-	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "YEAR":
-		return "INTEGER"
-	// 浮点类型
-	case "FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC":
-		return "REAL"
-	// 布尔
-	case "BIT", "BOOLEAN", "BOOL":
-		return "INTEGER"
-	// 字符串类型
-	case "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "NCHAR", "NVARCHAR", "CLOB":
-		return "TEXT"
-	// 二进制类型
-	case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY":
-		return "BLOB"
-	// 日期时间
-	case "DATE", "DATETIME", "TIMESTAMP", "TIME":
-		return "TEXT" // SQLite 没有原生日期类型，用 TEXT 存储 ISO 格式
-	// JSON
-	case "JSON", "JSONB":
-		return "TEXT"
-	// 枚举和集合
-	case "ENUM", "SET":
-		return "TEXT"
-	default:
-		// 未知类型，尝试保留原始类型声明
-		if col.DataType != "" {
-			return col.DataType
-		}
-		return "TEXT"
+	return typeconv.ToSQLite(typeconv.Normalize(col.BaseType), col)
+}
+
+// scanRows 执行查询并按列名映射为 Row
+func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols []string) ([]types.Row, error) {
+	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: 查询数据失败: %w", err)
 	}
+	defer rows.Close()
+
+	var result []types.Row
+	for rows.Next() {
+		values := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, fmt.Errorf("sqlite: 读取数据失败: %w", err)
+		}
+		row := make(types.Row)
+		for i, col := range cols {
+			row[col] = values[i]
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: 遍历数据失败: %w", err)
+	}
+	return result, nil
+}
+
+func schemaColumnNames(schema types.TableSchema) []string {
+	var cols []string
+	for _, c := range schema.Columns {
+		cols = append(cols, c.Name)
+	}
+	return cols
 }
 
 // quoteIdentifiers 给列名加引号

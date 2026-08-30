@@ -4,11 +4,16 @@ package types
 type DatabaseType string
 
 const (
-	MySQL      DatabaseType = "mysql"
-	PostgreSQL DatabaseType = "postgres"
-	SQLite     DatabaseType = "sqlite"
-	MariaDB    DatabaseType = "mariadb"
-	OceanBase  DatabaseType = "oceanbase"
+	MySQL       DatabaseType = "mysql"
+	PostgreSQL  DatabaseType = "postgres"
+	SQLite      DatabaseType = "sqlite"
+	MariaDB     DatabaseType = "mariadb"
+	OceanBase   DatabaseType = "oceanbase"
+	TiDB        DatabaseType = "tidb"
+	OpenGauss   DatabaseType = "opengauss"
+	Dameng      DatabaseType = "dameng"
+	KingbaseES  DatabaseType = "kingbase"
+	CockroachDB DatabaseType = "cockroachdb"
 )
 
 // ConnectionConfig 数据库连接配置
@@ -40,6 +45,7 @@ type ColumnMeta struct {
 	Nullable      bool    `json:"nullable"`
 	DefaultValue  *string `json:"defaultValue,omitempty"`
 	AutoIncrement bool    `json:"autoIncrement"`
+	Unsigned      bool    `json:"unsigned,omitempty"` // MySQL 无符号
 	Comment       string  `json:"comment,omitempty"`
 	IsPrimaryKey  bool    `json:"isPrimaryKey"`
 }
@@ -91,6 +97,8 @@ type MigrationConfig struct {
 	Concurrency     int              `json:"concurrency"`              // 并发表迁移数
 	IgnoreErrors    bool             `json:"ignoreErrors"`            // 单表失败是否跳过
 	DropIfExists    bool             `json:"dropIfExists"`             // 目标表存在时是否先删除
+	BackupBefore    bool             `json:"backupBefore"`             // 迁移前备份目标库同名表
+	AutoRollback    bool             `json:"autoRollback"`             // 迁移失败时自动回滚到备份
 }
 
 // ProgressInfo 迁移进度信息
@@ -125,13 +133,26 @@ type MigrationReport struct {
 	TotalRows      int64             `json:"totalRows"`
 	FailedTables   []string          `json:"failedTables,omitempty"`
 	TableDetails   []TableReport     `json:"tableDetails"`
+	Backups        []BackupInfo      `json:"backups,omitempty"`     // 备份记录
+	RollbackCount  int               `json:"rollbackCount,omitempty"` // 回滚的表数
+	Error          string            `json:"error,omitempty"`        // 迁移失败原因（含取消）
 }
 
 // TableReport 单表迁移报告
 type TableReport struct {
-	TableName  string `json:"tableName"`
-	Rows       int64  `json:"rows"`
-	Status     string `json:"status"` // "success", "failed", "skipped"
-	Error      string `json:"error,omitempty"`
+	TableName   string `json:"tableName"`
+	Rows        int64  `json:"rows"`
+	Status      string `json:"status"` // "success", "failed", "skipped", "rolled_back"
+	Error       string `json:"error,omitempty"`
 	Duration   string `json:"duration"`
+	BackupTable string `json:"backupTable,omitempty"`  // 备份表名（如果有）
+	RolledBack bool   `json:"rolledBack,omitempty"`  // 是否已回滚
+}
+
+// BackupInfo 单表备份信息
+type BackupInfo struct {
+	OriginalTable string `json:"originalTable"`
+	BackupTable   string `json:"backupTable"`
+	CreatedAt     string `json:"createdAt"`
+	Restored      bool   `json:"restored,omitempty"` // 是否已恢复
 }
