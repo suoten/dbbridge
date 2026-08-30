@@ -1,5 +1,116 @@
+export namespace history {
+	
+	export class MigrationRecord {
+	    id: number;
+	    startTime: string;
+	    endTime: string;
+	    duration: string;
+	    sourceType: string;
+	    sourceHost: string;
+	    sourceDB: string;
+	    targetType: string;
+	    targetHost: string;
+	    targetDB: string;
+	    tablesTotal: number;
+	    tablesSuccess: number;
+	    tablesFailed: number;
+	    totalRows: number;
+	    status: string;
+	    tableDetails?: number[];
+	    backups?: number[];
+	    createdAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MigrationRecord(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.startTime = source["startTime"];
+	        this.endTime = source["endTime"];
+	        this.duration = source["duration"];
+	        this.sourceType = source["sourceType"];
+	        this.sourceHost = source["sourceHost"];
+	        this.sourceDB = source["sourceDB"];
+	        this.targetType = source["targetType"];
+	        this.targetHost = source["targetHost"];
+	        this.targetDB = source["targetDB"];
+	        this.tablesTotal = source["tablesTotal"];
+	        this.tablesSuccess = source["tablesSuccess"];
+	        this.tablesFailed = source["tablesFailed"];
+	        this.totalRows = source["totalRows"];
+	        this.status = source["status"];
+	        this.tableDetails = source["tableDetails"];
+	        this.backups = source["backups"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
+
+}
+
 export namespace main {
 	
+	export class ConnectionRequest {
+	    type: string;
+	    host: string;
+	    port: number;
+	    username: string;
+	    password: string;
+	    database: string;
+	    sslMode: string;
+	    charset: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConnectionRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.host = source["host"];
+	        this.port = source["port"];
+	        this.username = source["username"];
+	        this.password = source["password"];
+	        this.database = source["database"];
+	        this.sslMode = source["sslMode"];
+	        this.charset = source["charset"];
+	    }
+	}
+	export class GetBackupTablesResult {
+	    success: boolean;
+	    tables?: service.BackupTableItem[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new GetBackupTablesResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.tables = this.convertValues(source["tables"], service.BackupTableItem);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class GetTableSchemaResult {
 	    success: boolean;
 	    schema?: types.TableSchema;
@@ -68,41 +179,66 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class TestConnectionRequest {
-	    type: string;
-	    host: string;
-	    port: number;
-	    username: string;
-	    password: string;
-	    database: string;
-	    sslMode: string;
-	    charset: string;
+	export class RestoreAllResult {
+	    successCount: number;
+	    failedCount: number;
+	    failedItems?: string[];
 	
 	    static createFrom(source: any = {}) {
-	        return new TestConnectionRequest(source);
+	        return new RestoreAllResult(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.type = source["type"];
-	        this.host = source["host"];
-	        this.port = source["port"];
-	        this.username = source["username"];
-	        this.password = source["password"];
-	        this.database = source["database"];
-	        this.sslMode = source["sslMode"];
-	        this.charset = source["charset"];
+	        this.successCount = source["successCount"];
+	        this.failedCount = source["failedCount"];
+	        this.failedItems = source["failedItems"];
+	    }
+	}
+	export class RestoreTableResult {
+	    success: boolean;
+	    backupName: string;
+	    original?: string;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RestoreTableResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.backupName = source["backupName"];
+	        this.original = source["original"];
+	        this.error = source["error"];
+	    }
+	}
+	export class SimpleResult {
+	    success: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SimpleResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.error = source["error"];
 	    }
 	}
 	export class StartMigrationRequest {
-	    source: TestConnectionRequest;
-	    target: TestConnectionRequest;
+	    source: ConnectionRequest;
+	    target: ConnectionRequest;
 	    tables?: string[];
 	    structureOnly: boolean;
 	    dataOnly: boolean;
 	    batchSize: number;
+	    concurrency: number;
 	    dropIfExists: boolean;
 	    ignoreErrors: boolean;
+	    backupBefore: boolean;
+	    autoRollback: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new StartMigrationRequest(source);
@@ -110,14 +246,17 @@ export namespace main {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.source = this.convertValues(source["source"], TestConnectionRequest);
-	        this.target = this.convertValues(source["target"], TestConnectionRequest);
+	        this.source = this.convertValues(source["source"], ConnectionRequest);
+	        this.target = this.convertValues(source["target"], ConnectionRequest);
 	        this.tables = source["tables"];
 	        this.structureOnly = source["structureOnly"];
 	        this.dataOnly = source["dataOnly"];
 	        this.batchSize = source["batchSize"];
+	        this.concurrency = source["concurrency"];
 	        this.dropIfExists = source["dropIfExists"];
 	        this.ignoreErrors = source["ignoreErrors"];
+	        this.backupBefore = source["backupBefore"];
+	        this.autoRollback = source["autoRollback"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -138,7 +277,6 @@ export namespace main {
 		    return a;
 		}
 	}
-	
 	export class TestConnectionResult {
 	    success: boolean;
 	    version: string;
@@ -158,8 +296,45 @@ export namespace main {
 
 }
 
+export namespace service {
+	
+	export class BackupTableItem {
+	    backupName: string;
+	    originalName: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupTableItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.backupName = source["backupName"];
+	        this.originalName = source["originalName"];
+	    }
+	}
+
+}
+
 export namespace types {
 	
+	export class BackupInfo {
+	    originalTable: string;
+	    backupTable: string;
+	    createdAt: string;
+	    restored?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new BackupInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.originalTable = source["originalTable"];
+	        this.backupTable = source["backupTable"];
+	        this.createdAt = source["createdAt"];
+	        this.restored = source["restored"];
+	    }
+	}
 	export class ColumnMeta {
 	    name: string;
 	    dataType: string;
@@ -170,6 +345,7 @@ export namespace types {
 	    nullable: boolean;
 	    defaultValue?: string;
 	    autoIncrement: boolean;
+	    unsigned?: boolean;
 	    comment?: string;
 	    isPrimaryKey: boolean;
 	
@@ -188,6 +364,7 @@ export namespace types {
 	        this.nullable = source["nullable"];
 	        this.defaultValue = source["defaultValue"];
 	        this.autoIncrement = source["autoIncrement"];
+	        this.unsigned = source["unsigned"];
 	        this.comment = source["comment"];
 	        this.isPrimaryKey = source["isPrimaryKey"];
 	    }
@@ -240,6 +417,8 @@ export namespace types {
 	    status: string;
 	    error?: string;
 	    duration: string;
+	    backupTable?: string;
+	    rolledBack?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new TableReport(source);
@@ -252,6 +431,8 @@ export namespace types {
 	        this.status = source["status"];
 	        this.error = source["error"];
 	        this.duration = source["duration"];
+	        this.backupTable = source["backupTable"];
+	        this.rolledBack = source["rolledBack"];
 	    }
 	}
 	export class MigrationReport {
@@ -264,6 +445,9 @@ export namespace types {
 	    totalRows: number;
 	    failedTables?: string[];
 	    tableDetails: TableReport[];
+	    backups?: BackupInfo[];
+	    rollbackCount?: number;
+	    error?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new MigrationReport(source);
@@ -280,6 +464,9 @@ export namespace types {
 	        this.totalRows = source["totalRows"];
 	        this.failedTables = source["failedTables"];
 	        this.tableDetails = this.convertValues(source["tableDetails"], TableReport);
+	        this.backups = this.convertValues(source["backups"], BackupInfo);
+	        this.rollbackCount = source["rollbackCount"];
+	        this.error = source["error"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

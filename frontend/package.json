@@ -9,13 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@lucide/vue": "^1.37.0",
     "vue": "^3.5.0"
   },
   "devDependencies": {
+    "@babel/types": "^7.26.0",
     "@vitejs/plugin-vue": "^6.0.0",
     "typescript": "^5.6.3",
     "vite": "^7.0.0",
-    "vue-tsc": "^2.1.0",
-    "@babel/types": "^7.26.0"
+    "vue-tsc": "^2.1.0"
   }
 }

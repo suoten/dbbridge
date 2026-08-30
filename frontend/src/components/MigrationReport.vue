@@ -1,10 +1,33 @@
 <script lang="ts" setup>
+import {
+  CheckCircle2,
+  XCircle,
+  Database,
+  Clock,
+  Hash,
+  Layers,
+  AlertCircle,
+  Table2,
+  Archive,
+  RotateCcw,
+  ShieldCheck,
+} from '@lucide/vue'
+
 interface TableReport {
   tableName: string
   rows: number
   status: string
   error?: string
   duration: string
+  backupTable?: string
+  rolledBack?: boolean
+}
+
+interface BackupInfo {
+  originalTable: string
+  backupTable: string
+  createdAt: string
+  restored?: boolean
 }
 
 interface MigrationReport {
@@ -17,6 +40,8 @@ interface MigrationReport {
   totalRows: number
   failedTables?: string[]
   tableDetails: TableReport[]
+  backups?: BackupInfo[]
+  rollbackCount?: number
 }
 
 defineProps<{
@@ -27,57 +52,114 @@ function formatNumber(n: number): string {
   return n.toLocaleString()
 }
 
-function statusLabel(status: string): string {
-  return { success: '✓ 成功', failed: '✗ 失败', skipped: '⊘ 跳过' }[status] || status
+const statusConfig: Record<string, { label: string; icon: any; color: string; bg: string }> = {
+  success: { label: '成功', icon: CheckCircle2, color: 'var(--color-success)', bg: 'var(--color-success-light)' },
+  failed: { label: '失败', icon: XCircle, color: 'var(--color-danger)', bg: 'var(--color-danger-light)' },
+  rolled_back: { label: '已回滚', icon: RotateCcw, color: 'var(--color-warning)', bg: 'var(--color-warning-light)' },
+  skipped: { label: '跳过', icon: AlertCircle, color: 'var(--color-text-secondary)', bg: 'var(--color-bg)' },
+}
+
+function getStatus(s: string) {
+  return statusConfig[s] || statusConfig.skipped
 }
 </script>
 
 <template>
   <div v-if="report" class="report-panel">
-    <!-- 汇总 -->
-    <div class="report-summary">
-      <div class="summary-item">
-        <span class="summary-value success">{{ report.tablesSuccess }}</span>
-        <span class="summary-label">成功</span>
+    <!-- ====== Summary Cards ====== -->
+    <div class="summary-grid">
+      <div class="summary-card success-card">
+        <div class="summary-icon"><CheckCircle2 :size="24" /></div>
+        <div class="summary-body">
+          <span class="summary-value">{{ report.tablesSuccess }}</span>
+          <span class="summary-label">成功表</span>
+        </div>
       </div>
-      <div class="summary-item">
-        <span class="summary-value danger" v-if="report.tablesFailed > 0">{{ report.tablesFailed }}</span>
-        <span class="summary-value" v-else>0</span>
-        <span class="summary-label">失败</span>
+
+      <div class="summary-card" :class="{ 'danger-card': report.tablesFailed > 0 }">
+        <div class="summary-icon"><XCircle :size="24" /></div>
+        <div class="summary-body">
+          <span class="summary-value">{{ report.tablesFailed }}</span>
+          <span class="summary-label">失败表</span>
+        </div>
       </div>
-      <div class="summary-item">
-        <span class="summary-value">{{ formatNumber(report.totalRows) }}</span>
-        <span class="summary-label">总行数</span>
+
+      <div class="summary-card info-card">
+        <div class="summary-icon"><Hash :size="24" /></div>
+        <div class="summary-body">
+          <span class="summary-value">{{ formatNumber(report.totalRows) }}</span>
+          <span class="summary-label">总行数</span>
+        </div>
       </div>
-      <div class="summary-item">
-        <span class="summary-value">{{ report.duration }}</span>
-        <span class="summary-label">耗时</span>
+
+      <div class="summary-card neutral-card">
+        <div class="summary-icon"><Clock :size="24" /></div>
+        <div class="summary-body">
+          <span class="summary-value">{{ report.duration }}</span>
+          <span class="summary-label">总耗时</span>
+        </div>
+      </div>
+
+      <div class="summary-card warning-card" v-if="report.rollbackCount && report.rollbackCount > 0">
+        <div class="summary-icon"><RotateCcw :size="24" /></div>
+        <div class="summary-body">
+          <span class="summary-value">{{ report.rollbackCount }}</span>
+          <span class="summary-label">已回滚</span>
+        </div>
+      </div>
+      <div class="summary-card info-card" v-else-if="report.backups && report.backups.length > 0">
+        <div class="summary-icon"><Archive :size="24" /></div>
+        <div class="summary-body">
+          <span class="summary-value">{{ report.backups.length }}</span>
+          <span class="summary-label">备份表</span>
+        </div>
       </div>
     </div>
 
-    <!-- 表详情 -->
-    <div class="table-details">
-      <table>
-        <thead>
-          <tr>
-            <th>表名</th>
-            <th>行数</th>
-            <th>状态</th>
-            <th>耗时</th>
-            <th>错误</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="t in report.tableDetails" :key="t.tableName" :class="t.status">
-            <td class="table-name">{{ t.tableName }}</td>
-            <td class="table-rows">{{ formatNumber(t.rows) }}</td>
-            <td><span class="status-tag" :class="t.status">{{ statusLabel(t.status) }}</span></td>
-            <td class="table-duration">{{ t.duration }}</td>
-            <td class="table-error" v-if="t.error">{{ t.error }}</td>
-            <td v-else>—</td>
-          </tr>
-        </tbody>
-      </table>
+    <!-- ====== Table Details ====== -->
+    <div class="details-section">
+      <div class="details-header">
+        <Layers :size="16" />
+        <span>表迁移详情</span>
+      </div>
+
+      <div class="table-card-list">
+        <div
+          v-for="t in report.tableDetails"
+          :key="t.tableName"
+          class="table-card"
+          :class="t.status"
+        >
+          <div class="table-card-main">
+            <div class="table-card-icon">
+              <Table2 :size="16" />
+            </div>
+            <span class="table-card-name">{{ t.tableName }}</span>
+            <span class="table-card-status" :style="{ color: getStatus(t.status).color, background: getStatus(t.status).bg }">
+              <component :is="getStatus(t.status).icon" :size="11" />
+              {{ getStatus(t.status).label }}
+            </span>
+          </div>
+          <div class="table-card-meta">
+            <span class="meta-item">
+              <Hash :size="12" />
+              {{ formatNumber(t.rows) }} 行
+            </span>
+            <span class="meta-item">
+              <Clock :size="12" />
+              {{ t.duration }}
+            </span>
+            <span class="meta-item backup" v-if="t.backupTable" :class="{ restored: t.rolledBack }">
+              <Archive :size="12" />
+              {{ t.backupTable }}
+            </span>
+            <span class="meta-error" v-if="t.error && !t.rolledBack">
+              <AlertCircle :size="12" />
+              {{ t.error }}
+            </span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -89,110 +171,231 @@ function statusLabel(status: string): string {
   gap: 16px;
 }
 
-.report-summary {
-  display: flex;
-  gap: 16px;
-  padding: 16px;
-  background: var(--color-surface);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
+/* ====== Summary Cards ====== */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
 }
 
-.summary-item {
+.summary-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast);
+}
+
+.summary-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.summary-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.success-card .summary-icon {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.danger-card .summary-icon {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
+}
+
+.info-card .summary-icon {
+  background: var(--color-info-light);
+  color: var(--color-info);
+}
+
+.neutral-card .summary-icon {
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+}
+
+.summary-body {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  flex: 1;
 }
 
 .summary-value {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   font-family: var(--font-mono);
   color: var(--color-text);
+  line-height: 1.2;
 }
 
-.summary-value.success {
-  color: var(--color-success);
-}
-
-.summary-value.danger {
-  color: var(--color-danger);
-}
+.success-card .summary-value { color: var(--color-success); }
+.danger-card .summary-value { color: var(--color-danger); }
 
 .summary-label {
-  font-size: 12px;
-  color: var(--color-text-secondary);
-  margin-top: 4px;
-}
-
-.table-details {
-  background: var(--color-surface);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  overflow: auto;
-  max-height: 300px;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-th {
-  padding: 8px 12px;
-  text-align: left;
-  background: var(--color-surface-hover);
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  border-bottom: 1px solid var(--color-border);
-  position: sticky;
-  top: 0;
-}
-
-td {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--color-border);
-}
-
-tr:hover {
-  background: var(--color-surface-hover);
-}
-
-.table-name {
-  font-weight: 500;
-}
-
-.table-rows, .table-duration {
-  font-family: var(--font-mono);
-  color: var(--color-text-secondary);
-}
-
-.status-tag {
-  padding: 2px 8px;
-  border-radius: 4px;
   font-size: 11px;
-  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
 }
 
-.status-tag.success {
-  background: rgba(46, 204, 113, 0.1);
+/* ====== Details ====== */
+.details-section {
+  background: var(--color-surface);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+.details-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.table-card-list {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.table-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  margin-bottom: 4px;
+  transition: background var(--transition-fast);
+}
+
+.table-card:hover {
+  background: var(--color-surface-hover);
+}
+
+.table-card.failed {
+  background: rgba(239, 68, 68, 0.04);
+}
+
+.table-card-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.table-card-icon {
+  color: var(--color-text-tertiary);
+  display: flex;
+}
+
+.table-card.success .table-card-icon {
   color: var(--color-success);
 }
 
-.status-tag.failed {
-  background: rgba(231, 76, 60, 0.1);
+.table-card.failed .table-card-icon {
   color: var(--color-danger);
 }
 
-.status-tag.skipped {
-  background: rgba(108, 117, 125, 0.1);
-  color: var(--color-text-secondary);
+.table-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  font-family: var(--font-mono);
 }
 
-.table-error {
-  color: var(--color-danger);
+.table-card-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.table-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.meta-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+}
+
+.meta-error {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-danger);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta-item.backup {
+  color: var(--color-warning);
+}
+
+.meta-item.backup.restored {
+  color: var(--color-info);
+}
+
+/* Warning card (rollback count) */
+.warning-card .summary-icon {
+  background: var(--color-warning-light);
+  color: var(--color-warning);
+}
+
+/* ====== 响应式 ====== */
+
+/* ≤1024px：统计卡片降为 2 列 */
+@media (max-width: 1024px) {
+  .summary-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ≤560px：明细行允许换行，避免横向溢出 */
+@media (max-width: 560px) {
+  .table-card {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .table-card-meta {
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .meta-error {
+    max-width: 100%;
+    white-space: normal;
+  }
+}
+
+.warning-card .summary-value {
+  color: var(--color-warning);
 }
 </style>

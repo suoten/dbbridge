@@ -1,5 +1,19 @@
 <script lang="ts" setup>
 import { ref, computed } from 'vue'
+import {
+  Database,
+  Server,
+  Lock,
+  User,
+  KeyRound,
+  FileText,
+  Plug,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  ShieldCheck,
+  HardDrive,
+} from '@lucide/vue'
 
 export interface ConnectionConfig {
   type: string
@@ -14,6 +28,7 @@ export interface ConnectionConfig {
 
 const props = defineProps<{
   title: string
+  role: 'source' | 'target'
   modelValue: ConnectionConfig
   disabled?: boolean
 }>()
@@ -27,32 +42,52 @@ const testing = ref(false)
 const testResult = ref<{ success: boolean; version?: string; error?: string } | null>(null)
 
 const dbTypes = [
-  { value: 'mysql', label: 'MySQL' },
-  { value: 'mariadb', label: 'MariaDB' },
-  { value: 'postgres', label: 'PostgreSQL' },
-  { value: 'sqlite', label: 'SQLite' },
+  // 开源主流
+  { value: 'mysql', label: 'MySQL', icon: Database, group: '开源' },
+  { value: 'mariadb', label: 'MariaDB', icon: Database, group: '开源' },
+  { value: 'postgres', label: 'PostgreSQL', icon: Database, group: '开源' },
+  { value: 'sqlite', label: 'SQLite', icon: HardDrive, group: '开源' },
+  // 云原生 & 分布式
+  { value: 'tidb', label: 'TiDB', icon: Database, group: '分布式' },
+  { value: 'oceanbase', label: 'OceanBase', icon: Database, group: '分布式' },
+  { value: 'cockroachdb', label: 'CockroachDB', icon: Database, group: '分布式' },
+  // 国产数据库
+  { value: 'opengauss', label: 'openGauss', icon: Database, group: '国产' },
+  { value: 'dameng', label: '达梦 DM', icon: Database, group: '国产' },
+  { value: 'kingbase', label: '金仓 KingbaseES', icon: Database, group: '国产' },
 ]
 
 const isSQLite = computed(() => props.modelValue.type === 'sqlite')
-const isPostgres = computed(() => props.modelValue.type === 'postgres')
+const isPostgresLike = computed(() => ['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(props.modelValue.type))
+const isPostgres = isPostgresLike
 
-const localConfig = computed({
-  get: () => props.modelValue,
-  set: (val: ConnectionConfig) => emit('update:modelValue', val)
+const selectedDbType = computed(() => dbTypes.find(t => t.value === props.modelValue.type))
+
+const groupedTypes = computed(() => {
+  const groups: Record<string, typeof dbTypes> = {}
+  for (const t of dbTypes) {
+    const g = (t as any).group || '其他'
+    if (!groups[g]) groups[g] = []
+    groups[g].push(t)
+  }
+  return Object.entries(groups).map(([name, items]) => ({ name, items }))
 })
 
 function update(field: keyof ConnectionConfig, value: any) {
   const newConfig = { ...props.modelValue, [field]: value }
-  
-  // 切换数据库类型时设置默认端口
   if (field === 'type') {
     if (value === 'mysql' || value === 'mariadb') {
       newConfig.port = 3306
-    } else if (value === 'postgres') {
+    } else if (value === 'tidb') {
+      newConfig.port = 4000
+    } else if (value === 'oceanbase') {
+      newConfig.port = 2881
+    } else if (value === 'dameng') {
+      newConfig.port = 5236
+    } else if (['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(value)) {
       newConfig.port = 5432
     }
   }
-  
   emit('update:modelValue', newConfig)
 }
 
@@ -75,37 +110,60 @@ async function handleTest() {
 </script>
 
 <template>
-  <div class="connection-form card">
+  <div class="conn-form card">
+    <!-- Header -->
     <div class="form-header">
-      <h3>{{ title }}</h3>
+      <div class="header-left">
+        <div class="header-icon" :class="role">
+          <component v-if="selectedDbType" :is="selectedDbType.icon" :size="18" />
+          <Database v-else :size="18" />
+        </div>
+        <div>
+          <h3 class="form-title">{{ title }}</h3>
+          <span class="form-subtitle">{{ selectedDbType?.label || '未选择' }}</span>
+        </div>
+      </div>
       <button
-        class="btn btn-secondary btn-sm"
+        class="btn btn-primary btn-sm"
         @click="handleTest"
         :disabled="testing || disabled"
       >
-        {{ testing ? '测试中...' : '测试连接' }}
+        <Loader2 v-if="testing" :size="14" class="animate-spin" />
+        <Plug v-else :size="14" />
+        {{ testing ? '测试中' : '测试连接' }}
       </button>
     </div>
 
+    <!-- Body -->
     <div class="form-body">
-      <div class="form-row">
-        <div class="form-group">
-          <label class="label">数据库类型</label>
-          <select
-            class="select"
-            :value="modelValue.type"
-            @change="update('type', ($event.target as HTMLSelectElement).value)"
-            :disabled="disabled"
-          >
-            <option v-for="t in dbTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
-          </select>
+      <!-- DB Type Selector -->
+      <div class="db-type-selector">
+        <div class="db-type-group" v-for="grp in groupedTypes" :key="grp.name">
+          <div class="db-type-group-label">{{ grp.name }}</div>
+          <div class="db-type-group-items">
+            <button
+              v-for="t in grp.items"
+              :key="t.value"
+              class="db-type-btn"
+              :class="{ active: modelValue.type === t.value }"
+              @click="update('type', t.value)"
+              :disabled="disabled"
+            >
+              <component :is="t.icon" :size="16" />
+              {{ t.label }}
+            </button>
+          </div>
         </div>
       </div>
 
       <template v-if="!isSQLite">
+        <!-- Host & Port -->
         <div class="form-row">
-          <div class="form-group flex-2">
-            <label class="label">主机地址</label>
+          <div class="form-group flex-grow-2">
+            <label class="label">
+              <Server :size="12" />
+              主机地址
+            </label>
             <input
               class="input"
               type="text"
@@ -115,7 +173,7 @@ async function handleTest() {
               :disabled="disabled"
             />
           </div>
-          <div class="form-group">
+          <div class="form-group port-group">
             <label class="label">端口</label>
             <input
               class="input"
@@ -127,9 +185,13 @@ async function handleTest() {
           </div>
         </div>
 
+        <!-- Username & Password -->
         <div class="form-row">
           <div class="form-group">
-            <label class="label">用户名</label>
+            <label class="label">
+              <User :size="12" />
+              用户名
+            </label>
             <input
               class="input"
               type="text"
@@ -140,7 +202,10 @@ async function handleTest() {
             />
           </div>
           <div class="form-group">
-            <label class="label">密码</label>
+            <label class="label">
+              <KeyRound :size="12" />
+              密码
+            </label>
             <input
               class="input"
               type="password"
@@ -151,9 +216,13 @@ async function handleTest() {
           </div>
         </div>
 
+        <!-- Database & SSL -->
         <div class="form-row">
           <div class="form-group">
-            <label class="label">数据库名</label>
+            <label class="label">
+              <Database :size="12" />
+              数据库名
+            </label>
             <input
               class="input"
               type="text"
@@ -163,7 +232,10 @@ async function handleTest() {
             />
           </div>
           <div class="form-group" v-if="isPostgres">
-            <label class="label">SSL Mode</label>
+            <label class="label">
+              <ShieldCheck :size="12" />
+              SSL
+            </label>
             <select
               class="select"
               :value="modelValue.sslMode || 'disable'"
@@ -179,10 +251,14 @@ async function handleTest() {
         </div>
       </template>
 
+      <!-- SQLite: file path -->
       <template v-else>
         <div class="form-row">
           <div class="form-group">
-            <label class="label">数据库文件路径</label>
+            <label class="label">
+              <FileText :size="12" />
+              数据库文件路径
+            </label>
             <input
               class="input"
               type="text"
@@ -195,40 +271,155 @@ async function handleTest() {
         </div>
       </template>
 
-      <div v-if="testResult" class="test-result" :class="testResult.success ? 'success' : 'error'">
-        <span v-if="testResult.success">✓ 连接成功 — {{ testResult.version }}</span>
-        <span v-else>✗ {{ testResult.error }}</span>
-      </div>
+      <!-- Test Result -->
+      <Transition name="fade">
+        <div v-if="testResult" class="test-result" :class="testResult.success ? 'success' : 'error'">
+          <component
+            :is="testResult.success ? CheckCircle2 : XCircle"
+            :size="16"
+          />
+          <div class="result-text">
+            <span v-if="testResult.success" class="result-title">连接成功</span>
+            <span v-else class="result-title">连接失败</span>
+            <span v-if="testResult.version" class="result-detail">{{ testResult.version }}</span>
+            <span v-if="testResult.error" class="result-detail">{{ testResult.error }}</span>
+          </div>
+        </div>
+      </Transition>
     </div>
   </div>
 </template>
 
 <style scoped>
-.connection-form {
-  padding: 16px 20px;
+.conn-form {
+  padding: 18px 20px;
 }
 
+/* Header */
 .form-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
-  padding-bottom: 12px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
   border-bottom: 1px solid var(--color-border);
 }
 
-.form-header h3 {
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.header-icon.source {
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+  color: white;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+}
+
+.header-icon.target {
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  color: white;
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.25);
+}
+
+.form-title {
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--color-text);
 }
 
+.form-subtitle {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+/* Body */
 .form-body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
+/* DB Type Selector */
+.db-type-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
+}
+
+.db-type-group {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.db-type-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 2px;
+}
+
+.db-type-group-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.db-type-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  transition: all var(--transition-fast);
+  font-family: var(--font-sans);
+}
+
+.db-type-btn:hover:not(:disabled) {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.db-type-btn.active {
+  background: var(--color-surface);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-sm);
+  font-weight: 600;
+}
+
+.db-type-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Form rows */
 .form-row {
   display: flex;
   gap: 12px;
@@ -240,24 +431,72 @@ async function handleTest() {
   flex-direction: column;
 }
 
-.flex-2 {
+.flex-grow-2 {
   flex: 2;
 }
 
+.port-group {
+  max-width: 100px;
+}
+
+/* Label with icon */
+.label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Test Result */
 .test-result {
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
   font-size: 12px;
-  font-weight: 500;
 }
 
 .test-result.success {
-  background: rgba(46, 204, 113, 0.1);
+  background: var(--color-success-light);
   color: var(--color-success);
 }
 
 .test-result.error {
-  background: rgba(231, 76, 60, 0.1);
+  background: var(--color-danger-light);
   color: var(--color-danger);
+}
+
+.result-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.result-title {
+  font-weight: 600;
+}
+
+.result-detail {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+/* Animations */
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* ====== 响应式 ====== */
+
+/* ≤680px：表单行上下堆叠，类型按钮自动换行 */
+@media (max-width: 680px) {
+  .form-row {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .port-group {
+    max-width: 100%;
+  }
 }
 </style>
