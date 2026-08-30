@@ -1,0 +1,26 @@
+# Build output
+build/bin/
+build/windows/
+build/darwin/
+build/linux/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config
+*.env
+*.local
