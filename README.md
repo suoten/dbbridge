@@ -74,7 +74,7 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 | 数据库 | 作为源库 | 作为目标库 |
 |--------|:--------:|:--------:|
 | **MySQL** (5.7/8.0+) | ✅ | ✅ |
-| **PostgreSQL** (12+) | ✅ | ✅ |
+| **PostgreSQL** (14/16/17+) | ✅ | ✅ |
 | **SQLite** (3.x) | ✅ | ✅ |
 | **MariaDB** | ✅ | ✅ |
 | **OceanBase** | ✅ | ✅ |
@@ -111,7 +111,10 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 3. 填写源库和目标库的连接信息
 4. 点击"开始迁移"——完成！
 
-> 🎉 不需要安装任何其他东西。没有 JDK、没有 Python、没有运行时依赖。
+> 🎉 不需要安装 JDK、Python 等运行时依赖。
+>
+> ⚠️ **Windows 用户注意**：DBBridge 是基于 WebView2 的桌面应用。Windows 10/11 通常已内置 WebView2 运行时，
+> 如果双击后闪退或报错，请安装 [WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/) 后重试。
 
 ### 方式二：macOS 用户
 
@@ -248,11 +251,12 @@ powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 1.2.0
 
 脚本会自动完成：
 1. **构建前端**（Vue3 → `frontend/dist/`）
-2. **交叉编译**多平台二进制（`CGO_ENABLED=0` 纯 Go，无需 GCC）
-   - `dbbridge-linux-amd64`
-   - `dbbridge-linux-arm64`
-   - `dbbridge-windows-amd64.exe`
-3. **打包发布 zip**（每个 zip 包含：二进制 + install.sh + uninstall.sh + baota-proxy.sh + baota-nginx.conf + README.md）
+2. **编译多平台二进制**
+   - Linux amd64/arm64：`CGO_ENABLED=0` 纯 Go 交叉编译（headless Web 模式，无需 GCC）
+   - Windows amd64：`wails build`（完整桌面应用，含 WebView2 前端资源）
+3. **打包发布 zip**
+   - Linux 包：二进制 + install.sh + uninstall.sh + baota-proxy.sh + baota-nginx.conf + README.md
+   - Windows 包：DBBridge.exe + README.md + appicon.png
 4. **生成 SHA256 校验文件**
 
 产物在 `release/` 目录下：
@@ -264,8 +268,12 @@ release/
 └── checksums.txt
 ```
 
-> **为什么不需要 CGO？** DBBridge 使用 `modernc.org/sqlite`（纯 Go 实现的 SQLite），
-> 不依赖任何 C 库，因此可以 `CGO_ENABLED=0` 交叉编译，无需安装 GCC。
+> **为什么 Linux 不需要 CGO？** DBBridge 使用 `modernc.org/sqlite`（纯 Go 实现的 SQLite），
+> 不依赖任何 C 库，因此 Linux 版可以 `CGO_ENABLED=0` 交叉编译，无需安装 GCC。
+>
+> **Windows 版为什么用 wails build？** Wails 桌面应用依赖 WebView2 运行时，
+> `wails build` 会生成包含前端资源的完整桌面应用。用户机器需要安装 WebView2 运行时
+> （Windows 10/11 通常已内置，若未安装可从[微软官网](https://developer.microsoft.com/microsoft-edge/webview2/)下载）。
 
 ---
 
@@ -300,7 +308,7 @@ wails dev
 wails build
 ```
 
-### 纯 Go 交叉编译（不依赖 Wails）
+### 纯 Go 编译（Linux 服务器部署用）
 
 ```bash
 # 前端
@@ -311,10 +319,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o dbbridge .
 
 # Linux arm64 (信创/ARM 服务器)
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags "-s -w" -o dbbridge .
-
-# Windows amd64
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o dbbridge.exe .
 ```
+
+> ⚠️ Windows 桌面版请使用 `wails build -platform windows`，不要直接 `go build`。
+> `go build` 编译的 exe 缺少 Wails 桌面运行时初始化，可能导致无法启动。
 
 <details>
 <summary>📖 使用 Wails 构建各平台桌面版</summary>
@@ -480,9 +488,14 @@ sudo systemctl disable dbbridge
 ## ❓ 常见问题
 
 <details>
-<summary><b>Q: Windows 上运行提示"缺少 DLL"或"不是有效的 Win32 程序"？</b></summary>
+<summary><b>Q: Windows 上运行提示"缺少 DLL"、闪退或"不是有效的 Win32 程序"？</b></summary>
 
-请确保下载的是 Windows 版本的 `DBBridge.exe`。如果仍然报错，可能系统缺少 Visual C++ 运行库，请安装 [VC++ 运行库](https://aka.ms/vs/17/release/vc_redist.x64.exe) 后重试。
+DBBridge 是基于 WebView2 的桌面应用，需要 **WebView2 运行时**：
+
+1. **Windows 10/11 通常已内置** WebView2，大多数用户无需额外安装
+2. 如果双击后闪退，请下载安装 [WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/)
+3. 确保下载的是 Windows 版本的 `DBBridge.exe`（非 Linux 版）
+4. 如果仍报错，可能系统缺少 Visual C++ 运行库，请安装 [VC++ 运行库](https://aka.ms/vs/17/release/vc_redist.x64.exe)
 </details>
 
 <details>

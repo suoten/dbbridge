@@ -62,16 +62,12 @@ if (-not (Test-Path "frontend/dist/index.html")) {
 Write-Host "  Frontend built OK" -ForegroundColor DarkGray
 
 # ============================================================
-# 2. 交叉编译多平台二进制
-#    DBBridge 使用 modernc.org/sqlite（纯 Go），无需 CGO
+# 2. 编译多平台二进制
+#    - Linux: CGO_ENABLED=0 纯 Go 交叉编译（headless Web 模式）
+#    - Windows: wails build（生成完整桌面应用，含 WebView2 前端资源）
+#    DBBridge 使用 modernc.org/sqlite（纯 Go），Linux 无需 CGO
 # ============================================================
-Write-Host "[2/4] Cross-compiling binaries (CGO_ENABLED=0)..." -ForegroundColor Green
-
-$platforms = @(
-    @{ GOOS="linux";   GOARCH="amd64" },
-    @{ GOOS="linux";   GOARCH="arm64" },
-    @{ GOOS="windows"; GOARCH="amd64" }
-)
+Write-Host "[2/4] Building multi-platform binaries..." -ForegroundColor Green
 
 $distDir = "dist"
 if (Test-Path $distDir) { Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue }
@@ -85,43 +81,59 @@ try {
 } catch {}
 
 $ldflags = "-s -w -X main.Version=$Version -X main.BuildTime=$buildTime -X main.GitCommit=$gitCommit"
-
 $binaries = @{}
-foreach ($p in $platforms) {
-    $env:GOOS = $p.GOOS
-    $env:GOARCH = $p.GOARCH
-    $env:CGO_ENABLED = "0"
-    $env:GOPROXY = "https://goproxy.cn,direct"
 
-    $ext = ""
-    if ($p.GOOS -eq "windows") { $ext = ".exe" }
+# --- Linux amd64 ---
+$env:GOOS = "linux"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"; $env:GOPROXY = "https://goproxy.cn,direct"
+$out = "$distDir/dbbridge-linux-amd64"
+Write-Host "  Building linux/amd64..." -ForegroundColor DarkGray
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+& go build -ldflags="$ldflags" -o $out . 2>&1 | Out-Null
+$buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
+if ($buildExit -ne 0 -or -not (Test-Path $out)) { Write-Host "ERROR: Build failed for linux-amd64 (exit $buildExit)" -ForegroundColor Red; exit 1 }
+$binaries["dbbridge-linux-amd64"] = $out
+Write-Host "    -> dbbridge-linux-amd64 ($([math]::Round((Get-Item $out).Length / 1MB, 1)) MB)" -ForegroundColor Yellow
 
-    $key = "dbbridge-$($p.GOOS)-$($p.GOARCH)$ext"
-    $out = "$distDir/$key"
+# --- Linux arm64 ---
+$env:GOOS = "linux"; $env:GOARCH = "arm64"; $env:CGO_ENABLED = "0"; $env:GOPROXY = "https://goproxy.cn,direct"
+$out = "$distDir/dbbridge-linux-arm64"
+Write-Host "  Building linux/arm64..." -ForegroundColor DarkGray
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+& go build -ldflags="$ldflags" -o $out . 2>&1 | Out-Null
+$buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
+if ($buildExit -ne 0 -or -not (Test-Path $out)) { Write-Host "ERROR: Build failed for linux-arm64 (exit $buildExit)" -ForegroundColor Red; exit 1 }
+$binaries["dbbridge-linux-arm64"] = $out
+Write-Host "    -> dbbridge-linux-arm64 ($([math]::Round((Get-Item $out).Length / 1MB, 1)) MB)" -ForegroundColor Yellow
 
-    Write-Host "  Building $($p.GOOS)/$($p.GOARCH)..." -ForegroundColor DarkGray
+# 清理 Linux 交叉编译环境变量
+$env:GOOS = ""; $env:GOARCH = ""; $env:CGO_ENABLED = ""
 
-    # Go 会把诊断信息输出到 stderr，临时降低 ErrorActionPreference
-    $prevEAP = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
+# --- Windows amd64 (wails build) ---
+Write-Host "  Building windows/amd64 (wails build)..." -ForegroundColor DarkGray
+$env:GOPROXY = "https://goproxy.cn,direct"
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+# wails build 会输出到 build/bin/DBBridge.exe
+& wails build -platform windows/amd64 -ldflags $ldflags 2>&1 | Out-Null
+$buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
+$wailsExe = "build/bin/DBBridge.exe"
+if ($buildExit -ne 0 -or -not (Test-Path $wailsExe)) {
+    # 回退到 go build（需要用户机器有 WebView2 运行时）
+    Write-Host "  wails build failed, falling back to go build..." -ForegroundColor Yellow
+    $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+    $out = "$distDir/dbbridge-windows-amd64.exe"
+    $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & go build -ldflags="$ldflags" -o $out . 2>&1 | Out-Null
-    $buildExit = $LASTEXITCODE
-    $ErrorActionPreference = $prevEAP
-
-    if ($buildExit -ne 0 -or -not (Test-Path $out)) {
-        Write-Host "ERROR: Build failed for $key (exit $buildExit)" -ForegroundColor Red
-        exit 1
-    }
-
-    $binaries[$key] = $out
-    $sizeMB = [math]::Round((Get-Item $out).Length / 1MB, 1)
-    Write-Host "    -> $key ($sizeMB MB)" -ForegroundColor Yellow
+    $buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
+    $env:GOOS = ""; $env:GOARCH = ""; $env:CGO_ENABLED = ""
+    if ($buildExit -ne 0 -or -not (Test-Path $out)) { Write-Host "ERROR: Build failed for windows-amd64 (exit $buildExit)" -ForegroundColor Red; exit 1 }
+    $binaries["dbbridge-windows-amd64.exe"] = $out
+} else {
+    # 复制到 dist 目录
+    $out = "$distDir/dbbridge-windows-amd64.exe"
+    Copy-Item $wailsExe $out -Force
+    $binaries["dbbridge-windows-amd64.exe"] = $out
 }
-
-# 清理环境变量
-$env:GOOS = ""
-$env:GOARCH = ""
-$env:CGO_ENABLED = ""
+Write-Host "    -> dbbridge-windows-amd64.exe ($([math]::Round((Get-Item $out).Length / 1MB, 1)) MB)" -ForegroundColor Yellow
 Write-Host "  All binaries built OK" -ForegroundColor DarkGray
 
 # ============================================================
@@ -133,40 +145,36 @@ $releaseDir = "release"
 if (Test-Path $releaseDir) { Remove-Item -Recurse -Force $releaseDir -ErrorAction SilentlyContinue }
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 
-# 公共文件（每个包都包含）
-$commonFiles = @(
+# Linux 公共文件（install.sh 等仅 Linux 包需要）
+$linuxFiles = @(
     @{ Src="deploy/install.sh";          Dst="install.sh" },
     @{ Src="deploy/uninstall.sh";        Dst="uninstall.sh" },
     @{ Src="deploy/baota-proxy.sh";      Dst="baota-proxy.sh" },
-    @{ Src="deploy/baota-nginx.conf";    Dst="baota-nginx.conf" },
-    @{ Src="README.md";                   Dst="README.md" }
+    @{ Src="deploy/baota-nginx.conf";    Dst="baota-nginx.conf" }
 )
 
-foreach ($p in $platforms) {
-    $tag = "$($p.GOOS)-$($p.GOARCH)"
-    $ext = ""
-    if ($p.GOOS -eq "windows") { $ext = ".exe" }
-
+# 打包函数
+function Package-Zip($tag, $binKey, $isWindows, $extraFiles) {
+    $ext = if ($isWindows) { ".exe" } else { "" }
     $pkgDir = "release/dbbridge-$tag-pkg"
     New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
 
     # 复制二进制
-    $binKey = "dbbridge-$tag$ext"
     Copy-Item $binaries[$binKey] "$pkgDir/dbbridge$ext"
 
-    # 复制公共文件
-    foreach ($f in $commonFiles) {
-        if (Test-Path $f.Src) {
-            Copy-Item $f.Src "$pkgDir/$($f.Dst)"
+    # 复制 README
+    if (Test-Path "README.md") { Copy-Item "README.md" "$pkgDir/README.md" }
+
+    # 复制额外文件
+    if ($extraFiles) {
+        foreach ($f in $extraFiles) {
+            if (Test-Path $f.Src) { Copy-Item $f.Src "$pkgDir/$($f.Dst)" }
         }
     }
 
-    # Windows 包额外包含 NSIS 安装程序说明
-    if ($p.GOOS -eq "windows") {
-        # 如果有 build/windows 目录的图标等资源，也打包进去
-        if (Test-Path "build/appicon.png") {
-            Copy-Item "build/appicon.png" "$pkgDir/"
-        }
+    # Windows 包额外包含图标
+    if ($isWindows -and (Test-Path "build/appicon.png")) {
+        Copy-Item "build/appicon.png" "$pkgDir/"
     }
 
     # 打 zip 包
@@ -177,11 +185,17 @@ foreach ($p in $platforms) {
     $size = [math]::Round((Get-Item $zipball).Length / 1MB, 1)
     Write-Host "    -> $zipball ($size MB)" -ForegroundColor Yellow
 
-    # 清理临时目录
-    if (Test-Path $pkgDir) {
-        Remove-Item -Recurse -Force $pkgDir -ErrorAction SilentlyContinue
-    }
+    if (Test-Path $pkgDir) { Remove-Item -Recurse -Force $pkgDir -ErrorAction SilentlyContinue }
 }
+
+# 打包 Linux amd64
+Package-Zip -tag "linux-amd64" -binKey "dbbridge-linux-amd64" -isWindows $false -extraFiles $linuxFiles
+
+# 打包 Linux arm64
+Package-Zip -tag "linux-arm64" -binKey "dbbridge-linux-arm64" -isWindows $false -extraFiles $linuxFiles
+
+# 打包 Windows amd64（不包含 Linux 脚本）
+Package-Zip -tag "windows-amd64" -binKey "dbbridge-windows-amd64.exe" -isWindows $true -extraFiles $null
 
 # ============================================================
 # 4. 生成 SHA256 校验文件
