@@ -283,6 +283,8 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		case "rolled_back":
 			report.TablesFailed++
 			report.FailedTables = append(report.FailedTables, tr.TableName)
+		case "cancelled":
+			report.TablesCancelled++
 		}
 	}
 	report.RollbackCount = o.countRollbacks(report.TableDetails)
@@ -343,6 +345,12 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 	}
 
 	o.log("INFO", tableName, fmt.Sprintf("表结构: %d 列, %d 索引", len(schema.Columns), len(schema.Indexes)))
+
+	// DataOnly 模式直接向已存在的表追加数据，备份/回滚（基于表重命名）不适用，
+	// 显式告警避免用户误以为有备份保护
+	if o.config.DataOnly && o.config.BackupBefore {
+		o.log("WARN", tableName, "仅迁数据模式不支持迁移前备份与自动回滚（该机制依赖表重命名）")
+	}
 
 	// 迁移结构
 	if !o.config.DataOnly {
@@ -468,6 +476,10 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 
 			if useKeyset && len(rows) > 0 {
 				lastKey = rows[len(rows)-1][pkCol]
+				// 主键列含 NULL 时游标无法推进，SQL 会退化为无条件的全表首查导致死循环
+				if lastKey == nil {
+					return processed, fmt.Errorf("主键列 %s 存在 NULL 值，无法使用游标分页，请为该列补充 NOT NULL 约束或去除 NULL 数据后重试", pkCol)
+				}
 			}
 			processed += int64(len(rows))
 			offset += len(rows)
@@ -486,23 +498,33 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 }
 
 // tryRollback 尝试回滚单张表到迁移前状态
-// 找到该表的备份记录，将备份表恢复为原表名
+// 找到该表的备份记录，将备份表恢复为原表名。
+// 注意：RestoreFromBackup 是网络 I/O，必须在锁外执行，否则会阻塞所有进度上报。
 func (o *Orchestrator) tryRollback(ctx context.Context, tableName string) bool {
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	var backup *types.BackupInfo
 	for i := range o.backups {
 		if o.backups[i].OriginalTable == tableName && !o.backups[i].Restored {
-			err := o.targetAdapter.RestoreFromBackup(ctx, o.backups[i].BackupTable, tableName)
-			if err != nil {
-				o.log("ERROR", tableName, fmt.Sprintf("回滚失败: %v", err))
-				return false
-			}
-			o.backups[i].Restored = true
-			return true
+			backup = &o.backups[i]
+			break
 		}
 	}
-	// 没有备份记录，无法回滚
-	return false
+	o.mu.Unlock()
+
+	if backup == nil {
+		// 没有备份记录，无法回滚
+		return false
+	}
+
+	err := o.targetAdapter.RestoreFromBackup(ctx, backup.BackupTable, tableName)
+	if err != nil {
+		o.log("ERROR", tableName, fmt.Sprintf("回滚失败: %v", err))
+		return false
+	}
+	o.mu.Lock()
+	backup.Restored = true
+	o.mu.Unlock()
+	return true
 }
 
 // countRollbacks 统计已回滚的表数
@@ -516,14 +538,21 @@ func (o *Orchestrator) countRollbacks(reports []types.TableReport) int {
 	return count
 }
 
-// splitSQL 分割多条 SQL 语句（忽略引号内的分号）
+// splitSQL 分割多条 SQL 语句（忽略引号内的分号与反斜杠转义）
 func splitSQL(sqlText string) []string {
 	var statements []string
 	var current strings.Builder
 	inSingleQuote := false
 	inDoubleQuote := false
+	escaped := false // 单引号内反斜杠转义（MySQL 语义）
 
 	for _, ch := range sqlText {
+		if inSingleQuote && escaped {
+			// 转义字符（\' 或 \\）随其后字符原样保留
+			escaped = false
+			current.WriteRune(ch)
+			continue
+		}
 		switch ch {
 		case '\'':
 			if !inDoubleQuote {
@@ -532,6 +561,10 @@ func splitSQL(sqlText string) []string {
 		case '"':
 			if !inSingleQuote {
 				inDoubleQuote = !inDoubleQuote
+			}
+		case '\\':
+			if inSingleQuote {
+				escaped = true
 			}
 		case ';':
 			if !inSingleQuote && !inDoubleQuote {
@@ -555,10 +588,22 @@ func splitSQL(sqlText string) []string {
 	return statements
 }
 
-// truncate 截断字符串用于错误信息展示
+// truncate 截断字符串用于错误信息展示（按 rune 截断，避免切断多字节 UTF-8 产生乱码）
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	runes := []rune(s)
+	// 按 rune 收集不超过 n 字节的前缀
+	var sb strings.Builder
+	used := 0
+	for _, r := range runes {
+		size := len(string(r))
+		if used+size > n {
+			break
+		}
+		sb.WriteRune(r)
+		used += size
+	}
+	return sb.String() + "..."
 }

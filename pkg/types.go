@@ -130,6 +130,7 @@ type MigrationReport struct {
 	TablesTotal    int               `json:"tablesTotal"`
 	TablesSuccess  int               `json:"tablesSuccess"`
 	TablesFailed   int               `json:"tablesFailed"`
+	TablesCancelled int              `json:"tablesCancelled,omitempty"` // 用户取消时未完成的表数
 	TotalRows      int64             `json:"totalRows"`
 	FailedTables   []string          `json:"failedTables,omitempty"`
 	TableDetails   []TableReport     `json:"tableDetails"`

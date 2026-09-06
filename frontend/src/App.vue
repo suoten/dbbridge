@@ -76,6 +76,7 @@ const migrationConfig = ref({
 
 const migrating = ref(false)
 const report = ref<any>(null)
+const migrationError = ref('')
 
 const selectedTables = computed(() => tables.value.filter(t => t.selected).map(t => t.name))
 
@@ -127,6 +128,7 @@ function goToTables() {
 async function startMigration() {
   migrating.value = true
   report.value = null
+  migrationError.value = ''
   activeTab.value = 'migrate'
   try {
     const req = {
@@ -137,8 +139,9 @@ async function startMigration() {
     }
     // @ts-ignore - Wails binding
     report.value = await window.go.main.App.StartMigration(req)
-  } catch (e) {
-    console.error(e)
+  } catch (e: any) {
+    // 迁移启动失败必须让用户看到，不能只留在控制台
+    migrationError.value = e?.message || String(e)
   } finally {
     migrating.value = false
   }
@@ -488,6 +491,10 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
 
           <!-- ====== Step 3: 执行迁移 ====== -->
           <div v-else key="migrate" class="step-content migrate-step">
+            <div v-if="migrationError && !migrating" class="migration-error card">
+              <FileWarning :size="16" />
+              <span>迁移启动失败：{{ migrationError }}</span>
+            </div>
             <ProgressPanel />
             <div v-if="report && !migrating" class="report-wrapper">
               <MigrationReport :report="report" />
@@ -1067,6 +1074,18 @@ padding: 8px 4px 4px;
      改为脱离拉伸按内容增高，min-height 保底占满一屏，超出由 content-area 滚动 */
   align-self: flex-start;
   min-height: 100%;
+}
+
+.migration-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  font-size: 13px;
+  color: var(--color-danger);
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--color-danger);
+  word-break: break-all;
 }
 
 .report-wrapper {

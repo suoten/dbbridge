@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -16,7 +17,6 @@ import (
 	types "dbbridge/pkg"
 
 	"github.com/lib/pq"
-	_ "github.com/lib/pq"
 )
 
 // Option 基座行为选项
@@ -53,15 +53,23 @@ func New(brand string, opts ...Option) *Base {
 func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error {
 	sslmode := config.SSLMode
 	if sslmode == "" {
-		sslmode = "disable"
+		sslmode = "prefer"
 	}
-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		config.Host, config.Port, config.Username, config.Password, config.Database, sslmode)
-
-	db, err := sql.Open("postgres", dsn)
+	// 通过 URL 形式构造连接串，url.UserPassword 会自动编码密码中的特殊字符
+	dsn := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(config.Username, config.Password),
+		Host:   fmt.Sprintf("%s:%d", config.Host, config.Port),
+		Path:   config.Database,
+		RawQuery: url.Values{
+			"sslmode": []string{sslmode},
+		}.Encode(),
+	}
+	connector, err := pq.NewConnector(dsn.String())
 	if err != nil {
-		return fmt.Errorf("%s: 打开数据库失败: %w", a.brand(), err)
+		return fmt.Errorf("%s: 构造连接串失败: %w", a.brand(), err)
 	}
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(10)
 	a.db = db
 	return nil
@@ -237,27 +245,35 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		AND tc.constraint_type = 'PRIMARY KEY'
 		ORDER BY kcu.ordinal_position
 	`, tableName)
-	if err == nil {
-		var pkCols []string
-		for pkRows.Next() {
-			var colName string
-			pkRows.Scan(&colName)
-			pkCols = append(pkCols, colName)
+	if err != nil {
+		return schema, fmt.Errorf("%s: 查询主键信息失败: %w", a.brand(), err)
+	}
+	var pkCols []string
+	for pkRows.Next() {
+		var colName string
+		if err := pkRows.Scan(&colName); err != nil {
+			pkRows.Close()
+			return schema, fmt.Errorf("%s: 读取主键信息失败: %w", a.brand(), err)
 		}
+		pkCols = append(pkCols, colName)
+	}
+	if err := pkRows.Err(); err != nil {
 		pkRows.Close()
-		if len(pkCols) > 0 {
-			schema.Indexes = append(schema.Indexes, types.IndexMeta{
-				Name:      "PRIMARY",
-				Columns:   pkCols,
-				IsUnique:  true,
-				IsPrimary: true,
-			})
-			// 标记列
-			for i := range schema.Columns {
-				for _, pk := range pkCols {
-					if schema.Columns[i].Name == pk {
-						schema.Columns[i].IsPrimaryKey = true
-					}
+		return schema, fmt.Errorf("%s: 遍历主键信息失败: %w", a.brand(), err)
+	}
+	pkRows.Close()
+	if len(pkCols) > 0 {
+		schema.Indexes = append(schema.Indexes, types.IndexMeta{
+			Name:      "PRIMARY",
+			Columns:   pkCols,
+			IsUnique:  true,
+			IsPrimary: true,
+		})
+		// 标记列
+		for i := range schema.Columns {
+			for _, pk := range pkCols {
+				if schema.Columns[i].Name == pk {
+					schema.Columns[i].IsPrimaryKey = true
 				}
 			}
 		}
@@ -280,22 +296,26 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		AND NOT ix.indisprimary
 		GROUP BY i.relname, ix.indisunique
 	`, tableName)
-	if err == nil {
-		defer idxRows.Close()
-		for idxRows.Next() {
-			var idxName string
-			var colArray []string
-			var isUnique bool
-			// lib/pq 不能直接 Scan text[] 到 []string，需 pq.Array 包装，否则索引静默丢失
-			if err := idxRows.Scan(&idxName, pq.Array(&colArray), &isUnique); err != nil {
-				continue
-			}
-			schema.Indexes = append(schema.Indexes, types.IndexMeta{
-				Name:     idxName,
-				Columns:  colArray,
-				IsUnique: isUnique,
-			})
+	if err != nil {
+		return schema, fmt.Errorf("%s: 查询索引信息失败: %w", a.brand(), err)
+	}
+	defer idxRows.Close()
+	for idxRows.Next() {
+		var idxName string
+		var colArray []string
+		var isUnique bool
+		// lib/pq 不能直接 Scan text[] 到 []string，需 pq.Array 包装，否则索引静默丢失
+		if err := idxRows.Scan(&idxName, pq.Array(&colArray), &isUnique); err != nil {
+			return schema, fmt.Errorf("%s: 读取索引信息失败: %w", a.brand(), err)
 		}
+		schema.Indexes = append(schema.Indexes, types.IndexMeta{
+			Name:     idxName,
+			Columns:  colArray,
+			IsUnique: isUnique,
+		})
+	}
+	if err := idxRows.Err(); err != nil {
+		return schema, fmt.Errorf("%s: 遍历索引信息失败: %w", a.brand(), err)
 	}
 
 	return schema, nil

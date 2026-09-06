@@ -31,5 +31,7 @@ func (a *Adapter) GetVersion(ctx context.Context) (string, error) {
 	if err := a.DB().QueryRowContext(ctx, "SELECT * FROM v$version WHERE ROWNUM = 1").Scan(&version); err == nil {
 		return "Dameng DM " + version, nil
 	}
-	return "DM (达梦)", nil
+	// 两种探测均失败时返回未知版本而非静默伪装成功，
+	// 让调用方（如 TestConnection）感知到兼容模式探测异常
+	return "Dameng DM (未知版本)", nil
 }

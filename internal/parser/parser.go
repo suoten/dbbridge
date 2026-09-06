@@ -87,6 +87,10 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 	for {
 		line, err := p.reader.ReadString('\n')
 		if err == io.EOF {
+			// 文件在引号未闭合时结束，说明语句不完整，明确报错而非静默当作完整语句
+			if inSingleQuote || inDoubleQuote || inBacktick {
+				return nil, fmt.Errorf("parser: 第 %d 行开始的语句在文件末尾引号未闭合", startLine)
+			}
 			// 文件末尾
 			if hasContent {
 				stmt := strings.TrimSpace(sb.String())
@@ -129,18 +133,19 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 			ch := line[i]
 
 			switch ch {
-			case '\'':
-				if !inDoubleQuote && !inBacktick {
-					// 处理转义的单引号（MySQL 用 \ 或 ''）
-					if i > 0 && line[i-1] == '\\' {
-						continue
-					}
-					if i+1 < len(line) && line[i+1] == '\'' && !inSingleQuote {
-						i++ // 跳过转义的引号
-						continue
-					}
-					inSingleQuote = !inSingleQuote
+		case '\'':
+			if !inDoubleQuote && !inBacktick {
+				// 处理转义的单引号（MySQL 用 \ 或 ''）
+				if i > 0 && line[i-1] == '\\' {
+					continue
 				}
+				// 字符串内的 '' 是转义引号，跳过后保持字符串状态
+				if inSingleQuote && i+1 < len(line) && line[i+1] == '\'' {
+					i++
+					continue
+				}
+				inSingleQuote = !inSingleQuote
+			}
 			case '"':
 				if !inSingleQuote && !inBacktick {
 					inDoubleQuote = !inDoubleQuote

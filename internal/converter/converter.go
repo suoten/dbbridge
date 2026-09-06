@@ -124,13 +124,44 @@ func (c *Converter) convertInsert(ddl string) (string, error) {
 	case types.MySQL, types.MariaDB:
 		return ddl, nil // MySQL 源和目标一致时不需要转换
 	case types.PostgreSQL, types.SQLite:
-		// 将反引号替换为双引号
-		converted := strings.ReplaceAll(ddl, "`", "\"")
+		// 将反引号标识符替换为双引号，但跳过单引号字符串字面量内部，
+		// 避免改写数据内容（如 INSERT 值中的 `code`）
+		converted := replaceBackticksOutsideStrings(ddl)
 		// MySQL 的 \ 转义在 PG 中不适用，但这个复杂度较高，暂保留
 		return converted, nil
 	default:
 		return ddl, nil
 	}
+}
+
+// replaceBackticksOutsideStrings 将反引号替换为双引号，但跳过单引号字符串字面量内部。
+// 兼容 MySQL 的反斜杠转义（\' 与 \\）。
+func replaceBackticksOutsideStrings(s string) string {
+	var sb strings.Builder
+	inString := false
+	escaped := false
+	for _, r := range s {
+		if inString {
+			if escaped {
+				escaped = false
+			} else if r == '\\' {
+				escaped = true
+			} else if r == '\'' {
+				inString = false
+			}
+			sb.WriteRune(r)
+			continue
+		}
+		switch r {
+		case '\'':
+			inString = true
+		case '`':
+			sb.WriteByte('"')
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
 }
 
 // parseCreateTable 从 CREATE TABLE DDL 中解析出 TableSchema

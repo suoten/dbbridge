@@ -14,6 +14,7 @@ import (
 	types "dbbridge/pkg"
 	"dbbridge/internal/typeconv"
 
+	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -34,20 +35,20 @@ func (a *Base) DB() *sql.DB { return a.db }
 
 // Connect 连接数据库
 func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true",
-		config.Username,
-		config.Password,
-		config.Host,
-		config.Port,
-		config.Database,
-	)
+	cfg := mysql.NewConfig()
+	cfg.User = config.Username
+	cfg.Passwd = config.Password
+	cfg.Net = "tcp"
+	cfg.Addr = fmt.Sprintf("%s:%d", config.Host, config.Port)
+	cfg.DBName = config.Database
+	cfg.ParseTime = true
 	if config.Charset != "" {
-		dsn += "&charset=" + config.Charset
+		cfg.Params = map[string]string{"charset": config.Charset}
 	} else {
-		dsn += "&charset=utf8mb4"
+		cfg.Params = map[string]string{"charset": "utf8mb4"}
 	}
 
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
 		return fmt.Errorf("%s: 打开数据库失败: %w", a.brand(), err)
 	}
@@ -105,6 +106,9 @@ func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 			Name:    name,
 			Comment: comment,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历表列表失败: %w", a.brand(), err)
 	}
 	return tables, nil
 }
@@ -201,6 +205,10 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		columns = append(columns, col)
 	}
 
+	if err := rows.Err(); err != nil {
+		return schema, fmt.Errorf("%s: 遍历列信息失败: %w", a.brand(), err)
+	}
+
 	schema.Columns = columns
 
 	// 获取索引信息
@@ -216,11 +224,12 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 	defer indexRows.Close()
 
 	indexMap := make(map[string]*types.IndexMeta)
+	var indexOrder []string
 	for indexRows.Next() {
 		var idxName, colName string
 		var nonUnique, seqInIndex int
 		if err := indexRows.Scan(&idxName, &colName, &nonUnique, &seqInIndex); err != nil {
-			continue
+			return schema, fmt.Errorf("%s: 读取索引信息失败: %w", a.brand(), err)
 		}
 		isPrimary := idxName == "PRIMARY"
 		if isPrimary {
@@ -231,12 +240,16 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 				Name:     idxName,
 				IsUnique: nonUnique == 0,
 			}
+			indexOrder = append(indexOrder, idxName)
 		}
 		indexMap[idxName].Columns = append(indexMap[idxName].Columns, colName)
 	}
+	if err := indexRows.Err(); err != nil {
+		return schema, fmt.Errorf("%s: 遍历索引信息失败: %w", a.brand(), err)
+	}
 
-	for _, idx := range indexMap {
-		schema.Indexes = append(schema.Indexes, *idx)
+	for _, name := range indexOrder {
+		schema.Indexes = append(schema.Indexes, *indexMap[name])
 	}
 
 	if len(pkColumns) > 0 {
@@ -257,26 +270,32 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		AND REFERENCED_TABLE_NAME IS NOT NULL
 		ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
 	`, tableName)
-	if err == nil {
-		defer fkRows.Close()
-		fkMap := make(map[string]*types.ForeignKeyMeta)
-		for fkRows.Next() {
-			var constraintName, columnName, refTable, refColumn string
-			if err := fkRows.Scan(&constraintName, &columnName, &refTable, &refColumn); err != nil {
-				continue
-			}
-			if _, ok := fkMap[constraintName]; !ok {
-				fkMap[constraintName] = &types.ForeignKeyMeta{
-					Name:     constraintName,
-					RefTable: refTable,
-				}
-			}
-			fkMap[constraintName].Columns = append(fkMap[constraintName].Columns, columnName)
-			fkMap[constraintName].RefColumns = append(fkMap[constraintName].RefColumns, refColumn)
+	if err != nil {
+		return schema, fmt.Errorf("%s: 查询外键信息失败: %w", a.brand(), err)
+	}
+	defer fkRows.Close()
+	fkMap := make(map[string]*types.ForeignKeyMeta)
+	var fkOrder []string
+	for fkRows.Next() {
+		var constraintName, columnName, refTable, refColumn string
+		if err := fkRows.Scan(&constraintName, &columnName, &refTable, &refColumn); err != nil {
+			return schema, fmt.Errorf("%s: 读取外键信息失败: %w", a.brand(), err)
 		}
-		for _, fk := range fkMap {
-			schema.ForeignKeys = append(schema.ForeignKeys, *fk)
+		if _, ok := fkMap[constraintName]; !ok {
+			fkMap[constraintName] = &types.ForeignKeyMeta{
+				Name:     constraintName,
+				RefTable: refTable,
+			}
+			fkOrder = append(fkOrder, constraintName)
 		}
+		fkMap[constraintName].Columns = append(fkMap[constraintName].Columns, columnName)
+		fkMap[constraintName].RefColumns = append(fkMap[constraintName].RefColumns, refColumn)
+	}
+	if err := fkRows.Err(); err != nil {
+		return schema, fmt.Errorf("%s: 遍历外键信息失败: %w", a.brand(), err)
+	}
+	for _, name := range fkOrder {
+		schema.ForeignKeys = append(schema.ForeignKeys, *fkMap[name])
 	}
 
 	return schema, nil

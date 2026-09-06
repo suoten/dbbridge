@@ -51,7 +51,8 @@ func NewStore() (*Store, error) {
 	}
 
 	dbPath := filepath.Join(appDir, "history.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// WAL + busy_timeout：降低并发读写冲突导致的 SQLITE_BUSY
+	db, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("打开历史数据库失败: %w", err)
 	}
@@ -153,7 +154,7 @@ func (s *Store) GetRecords() ([]MigrationRecord, error) {
 			&r.TotalRows, &r.Status, &tableDetails, &backups, &r.CreatedAt,
 		)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("读取迁移记录失败: %w", err)
 		}
 		if tableDetails.Valid && tableDetails.String != "" {
 			r.TableDetails = json.RawMessage(tableDetails.String)
@@ -162,6 +163,9 @@ func (s *Store) GetRecords() ([]MigrationRecord, error) {
 			r.Backups = json.RawMessage(backups.String)
 		}
 		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历迁移记录失败: %w", err)
 	}
 	return records, nil
 }

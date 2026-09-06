@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	// 导入适配器包，触发 init() 自动注册
 	_ "dbbridge/internal/adapter/cockroachdb"
@@ -134,7 +135,10 @@ func toConfig(req ConnectionRequest) types.ConnectionConfig {
 
 // TestConnection 测试数据库连接
 func (a *App) TestConnection(req ConnectionRequest) TestConnectionResult {
-	version, err := a.connectionService.TestConnection(context.Background(), toConfig(req))
+	// 连接探测加超时，避免目标库网络黑洞时 UI 永久等待
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	version, err := a.connectionService.TestConnection(ctx, toConfig(req))
 	if err != nil {
 		return TestConnectionResult{Success: false, Error: err.Error()}
 	}
@@ -143,7 +147,9 @@ func (a *App) TestConnection(req ConnectionRequest) TestConnectionResult {
 
 // GetTables 获取数据库的表列表
 func (a *App) GetTables(req ConnectionRequest) GetTablesResult {
-	tables, err := a.connectionService.GetTables(context.Background(), toConfig(req))
+	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+	defer cancel()
+	tables, err := a.connectionService.GetTables(ctx, toConfig(req))
 	if err != nil {
 		return GetTablesResult{Success: false, Error: err.Error()}
 	}
@@ -152,7 +158,9 @@ func (a *App) GetTables(req ConnectionRequest) GetTablesResult {
 
 // GetTableSchema 获取单个表的结构
 func (a *App) GetTableSchema(req ConnectionRequest, tableName string) GetTableSchemaResult {
-	schema, err := a.connectionService.GetTableSchema(context.Background(), toConfig(req), tableName)
+	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+	defer cancel()
+	schema, err := a.connectionService.GetTableSchema(ctx, toConfig(req), tableName)
 	if err != nil {
 		return GetTableSchemaResult{Success: false, Error: err.Error()}
 	}
@@ -245,10 +253,18 @@ func (a *App) saveHistory(req StartMigrationRequest, report *types.MigrationRepo
 	// 序列化表详情和备份
 	var tableDetailsJSON, backupsJSON json.RawMessage
 	if len(report.TableDetails) > 0 {
-		tableDetailsJSON, _ = json.Marshal(report.TableDetails)
+		if data, err := json.Marshal(report.TableDetails); err == nil {
+			tableDetailsJSON = data
+		} else {
+			wailsRuntime.LogErrorf(a.ctx, "序列化表详情失败: %v", err)
+		}
 	}
 	if len(report.Backups) > 0 {
-		backupsJSON, _ = json.Marshal(report.Backups)
+		if data, err := json.Marshal(report.Backups); err == nil {
+			backupsJSON = data
+		} else {
+			wailsRuntime.LogErrorf(a.ctx, "序列化备份信息失败: %v", err)
+		}
 	}
 
 	record := history.MigrationRecord{
@@ -311,7 +327,9 @@ type GetBackupTablesResult struct {
 
 // GetBackupTables 获取目标库中所有备份表（以 _bak_ 开头的表）
 func (a *App) GetBackupTables(req ConnectionRequest) GetBackupTablesResult {
-	backups, err := a.backupService.GetBackupTables(context.Background(), toConfig(req))
+	ctx, cancel := context.WithTimeout(a.ctx, 60*time.Second)
+	defer cancel()
+	backups, err := a.backupService.GetBackupTables(ctx, toConfig(req))
 	if err != nil {
 		return GetBackupTablesResult{Success: false, Error: err.Error()}
 	}
@@ -336,7 +354,9 @@ type RestoreRequest struct {
 // RestoreTable 从备份恢复单张表
 // 注意：会删除当前同名表并将备份表重命名回原表名（丢弃迁移写入的新数据）
 func (a *App) RestoreTable(req RestoreRequest) RestoreTableResult {
-	originalName, err := a.backupService.RestoreTable(context.Background(), toConfig(req.Connection), req.BackupName)
+	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
+	defer cancel()
+	originalName, err := a.backupService.RestoreTable(ctx, toConfig(req.Connection), req.BackupName)
 	if err != nil {
 		return RestoreTableResult{Success: false, BackupName: req.BackupName, Error: err.Error()}
 	}
@@ -352,7 +372,9 @@ type RestoreAllResult struct {
 
 // RestoreAllTables 批量从备份恢复多张表
 func (a *App) RestoreAllTables(req RestoreRequest) RestoreAllResult {
-	r := a.backupService.RestoreAllTables(context.Background(), toConfig(req.Connection), req.BackupNames)
+	ctx, cancel := context.WithTimeout(a.ctx, 300*time.Second)
+	defer cancel()
+	r := a.backupService.RestoreAllTables(ctx, toConfig(req.Connection), req.BackupNames)
 	return RestoreAllResult{
 		SuccessCount: r.SuccessCount,
 		FailedCount:  r.FailedCount,
@@ -362,7 +384,9 @@ func (a *App) RestoreAllTables(req RestoreRequest) RestoreAllResult {
 
 // DeleteBackup 删除一个备份表（确认迁移无误后清理）
 func (a *App) DeleteBackup(req RestoreRequest) SimpleResult {
-	if err := a.backupService.DeleteBackup(context.Background(), toConfig(req.Connection), req.BackupName); err != nil {
+	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
+	defer cancel()
+	if err := a.backupService.DeleteBackup(ctx, toConfig(req.Connection), req.BackupName); err != nil {
 		return SimpleResult{Success: false, Error: err.Error()}
 	}
 	return SimpleResult{Success: true}

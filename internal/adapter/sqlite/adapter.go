@@ -35,8 +35,12 @@ func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) er
 	if dsn == "" || dsn == ":memory:" {
 		dsn = ":memory:"
 	}
-	// 添加 pragma 优化
-	dsn = fmt.Sprintf("%s?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000", dsn)
+	// 添加 pragma 优化；用户可能传入带参数的 DSN（如 file:x.db?mode=ro），此时用 & 追加
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	dsn = fmt.Sprintf("%s%s_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000", dsn, sep)
 
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -98,7 +102,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 	}
 
 	// 获取列信息
-	rows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", tableName))
+	rows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", escapeIdent(tableName)))
 	if err != nil {
 		return schema, fmt.Errorf("sqlite: 获取表结构失败: %w", err)
 	}
@@ -181,8 +185,8 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 			continue
 		}
 		srows, err := a.db.QueryContext(ctx, fmt.Sprintf(
-			`SELECT %q FROM %q WHERE %q IS NOT NULL AND %q != '' LIMIT 50`,
-			col.Name, tableName, col.Name, col.Name))
+			`SELECT %s FROM %s WHERE %s IS NOT NULL AND %s != '' LIMIT 50`,
+			escapeIdent(col.Name), escapeIdent(tableName), escapeIdent(col.Name), escapeIdent(col.Name)))
 		if err != nil {
 			continue
 		}
@@ -220,7 +224,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		unique bool
 	}
 	var idxList []idxInfo
-	indexRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%q)", tableName))
+	indexRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", escapeIdent(tableName)))
 	if err == nil {
 		for indexRows.Next() {
 			// 现代 SQLite 返回 5 列 (seq,name,unique,origin,partial)，老版本 3 列；
@@ -242,7 +246,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 
 	for _, it := range idxList {
 		// 获取索引列
-		idxColRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%q)", it.name))
+		idxColRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%s)", escapeIdent(it.name)))
 		if err != nil {
 			continue
 		}
@@ -270,7 +274,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 // GetRowCount 获取表的行数
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	err := a.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %q", tableName)).Scan(&count)
+	err := a.db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", escapeIdent(tableName))).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("sqlite: 获取行数失败: %w", err)
 	}
@@ -293,7 +297,7 @@ func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, erro
 // BackupTable 将表重命名为备份表名
 func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
 	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", tableName, backupName))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", escapeIdent(tableName), escapeIdent(backupName)))
 	if err != nil {
 		return "", fmt.Errorf("sqlite: 备份表失败 (%s→%s): %w", tableName, backupName, err)
 	}
@@ -304,12 +308,12 @@ func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, er
 func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", originalName))
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeIdent(originalName)))
 		if err != nil {
 			return fmt.Errorf("sqlite: 恢复备份时删除当前表失败: %w", err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %q RENAME TO %q", backupName, originalName))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s", escapeIdent(backupName), escapeIdent(originalName)))
 	if err != nil {
 		return fmt.Errorf("sqlite: 恢复备份失败 (%s→%s): %w", backupName, originalName, err)
 	}
@@ -318,7 +322,7 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 
 // DropBackup 删除备份表
 func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %q", backupName))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeIdent(backupName)))
 	if err != nil {
 		return fmt.Errorf("sqlite: 删除备份表失败: %w", err)
 	}
@@ -328,14 +332,14 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 // GenerateCreateTableDDL 生成建表 SQL（类型经 typeconv 映射，支持异构迁移）
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %q (\n", table.Name))
+	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", escapeIdent(table.Name)))
 
 	for i, col := range table.Columns {
 		if i > 0 {
 			sb.WriteString(",\n")
 		}
 		sb.WriteString("  ")
-		sb.WriteString(fmt.Sprintf("%q ", col.Name))
+		sb.WriteString(escapeIdent(col.Name) + " ")
 
 		// 类型映射
 		sb.WriteString(a.MapType(col))
@@ -373,7 +377,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("%q", c))
+			sb.WriteString(escapeIdent(c))
 		}
 		sb.WriteString(")")
 	}
@@ -391,12 +395,12 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		} else {
 			sb.WriteString("CREATE INDEX ")
 		}
-		sb.WriteString(fmt.Sprintf("IF NOT EXISTS %q ON %q (", idx.Name, table.Name))
+		sb.WriteString(fmt.Sprintf("IF NOT EXISTS %s ON %s (", escapeIdent(idx.Name), escapeIdent(table.Name)))
 		for i, c := range idx.Columns {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("%q", c))
+			sb.WriteString(escapeIdent(c))
 		}
 		sb.WriteString(")")
 	}
@@ -406,7 +410,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf("DROP TABLE IF EXISTS %q", tableName), nil
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeIdent(tableName)), nil
 }
 
 // ReadData 按偏移量分页读取数据
@@ -417,7 +421,7 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 	}
 
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf("SELECT * FROM %q LIMIT %d OFFSET %d", tableName, limit, offset)
+	query := fmt.Sprintf("SELECT * FROM %s LIMIT %d OFFSET %d", escapeIdent(tableName), limit, offset)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -429,13 +433,13 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 	}
 
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf("SELECT * FROM %q", tableName)
+	query := fmt.Sprintf("SELECT * FROM %s", escapeIdent(tableName))
 	args := []any{}
 	if lastKey != nil {
 		args = append(args, lastKey)
-		query += fmt.Sprintf(" WHERE %q > ?", keyColumn)
+		query += fmt.Sprintf(" WHERE %s > ?", escapeIdent(keyColumn))
 	}
-	query += fmt.Sprintf(" ORDER BY %q ASC LIMIT %d", keyColumn, limit)
+	query += fmt.Sprintf(" ORDER BY %s ASC LIMIT %d", escapeIdent(keyColumn), limit)
 	return a.scanRows(ctx, query, args, cols)
 }
 
@@ -452,8 +456,8 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	}
 
 	query := fmt.Sprintf(
-		"INSERT INTO %q (%s) VALUES (%s)",
-		tableName,
+		"INSERT INTO %s (%s) VALUES (%s)",
+		escapeIdent(tableName),
 		quoteIdentifiers(columns),
 		strings.Join(placeholders, ", "),
 	)
@@ -545,11 +549,17 @@ func schemaColumnNames(schema types.TableSchema) []string {
 	return cols
 }
 
+// escapeIdent 以 SQL 方式转义标识符（双写引号），不能用 Go 的 %q——
+// 那会对 " 产生 \" 转义，在 SQL 里是字面反斜杠
+func escapeIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
 // quoteIdentifiers 给列名加引号
 func quoteIdentifiers(cols []string) string {
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
-		quoted[i] = fmt.Sprintf("%q", c)
+		quoted[i] = escapeIdent(c)
 	}
 	return strings.Join(quoted, ", ")
 }

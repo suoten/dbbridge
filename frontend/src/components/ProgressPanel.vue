@@ -52,15 +52,25 @@ const strokeDashoffset = computed(() => {
   return circumference - (progress.value.percent / 100) * circumference
 })
 
+// 日志条数上限：大数据量迁移的行级日志会持续增长，封顶防止内存无限膨胀
+const MAX_LOGS = 500
+
 onMounted(async () => {
   // @ts-ignore - Wails runtime
   const runtime = window.runtime
   if (runtime) {
     unlistenProgress = runtime.EventsOn('migration:progress', (info: ProgressInfo) => {
       progress.value = info
+      // 迁移结束（done 或中断后停止推送）时复位取消按钮状态
+      if (info.phase === 'done') {
+        cancelling.value = false
+      }
     })
     unlistenLog = runtime.EventsOn('migration:log', (entry: LogEntry) => {
       logs.value.push(entry)
+      if (logs.value.length > MAX_LOGS) {
+        logs.value.splice(0, logs.value.length - MAX_LOGS)
+      }
       nextTick(() => {
         if (logContainer.value) {
           logContainer.value.scrollTop = logContainer.value.scrollHeight
@@ -88,10 +98,13 @@ async function cancelMigration() {
   try {
     // @ts-ignore - Wails bindings
     await window.go.main.App.CancelMigration()
-  } finally {
-    // 等待进度事件将 phase 置为 done 后自动复位
-    setTimeout(() => { cancelling.value = false }, 3000)
+  } catch {
+    // 取消失败也复位按钮，允许用户重试
+    cancelling.value = false
   }
+  // 正常情况下由 done 进度事件复位；若后端已停止推送事件（如无进行中任务），
+  // 兜底复位避免按钮永久禁用
+  setTimeout(() => { cancelling.value = false }, 3000)
 }
 
 const phaseConfig: Record<string, { label: string; color: string; icon: any }> = {
