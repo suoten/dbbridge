@@ -1,20 +1,5 @@
 <p align="center">
-  <svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
-    <defs>
-      <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" style="stop-color:#3b82f6"/>
-        <stop offset="100%" style="stop-color:#8b5cf6"/>
-      </linearGradient>
-    </defs>
-    <rect width="120" height="120" rx="26" fill="url(#brandGrad)"/>
-    <g transform="translate(36,36) scale(2)" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M10 12h4"/>
-      <path d="M10 8h4"/>
-      <path d="M14 21v-3a2 2 0 0 0-4 0v3"/>
-      <path d="M6 10H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-2"/>
-      <path d="M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/>
-    </g>
-  </svg>
+  <img src="build/appicon.png" width="140" alt="DBBridge">
 </p>
 
 <p align="center">
@@ -626,6 +611,7 @@ powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 0.1.0
 - **GitHub**: [https://github.com/suoten/dbbridge](https://github.com/suoten/dbbridge)
 - **Gitee**: [https://gitee.com/suoten/dbbridge](https://gitee.com/suoten/dbbridge)
 - **Issue**: [https://github.com/suoten/dbbridge/issues](https://github.com/suoten/dbbridge/issues)
+- **QQ 群**: [1098728913](https://qm.qq.com/q/1098728913)（加群交流、问题反馈、功能建议）
 
 ---
 
