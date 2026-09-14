@@ -1,8 +1,4 @@
 <p align="center">
-  <img src="build/appicon.png" width="140" alt="DBBridge">
-</p>
-
-<p align="center">
   <img src="https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white" alt="Go">
   <img src="https://img.shields.io/badge/Vue-3.5+-42b883?logo=vue.js&logoColor=white" alt="Vue">
   <img src="https://img.shields.io/badge/Wails-2.x-f6ad55?logo=go&logoColor=white" alt="Wails">
@@ -16,7 +12,9 @@
   <a href="https://github.com/suoten/dbbridge/releases"><img src="https://img.shields.io/github/v/release/suoten/dbbridge" alt="GitHub Release"></a>
 </p>
 
-# DBBridge — 数据库迁移工具
+<h1 align="center">DBBridge</h1>
+
+<p align="center"><strong>数据库迁移工具</strong></p>
 
 > **填好连接信息，点击"开始迁移"，5 分钟搞定异构数据库迁移。**
 >

@@ -476,6 +476,7 @@ export namespace types {
 	    tablesTotal: number;
 	    tablesSuccess: number;
 	    tablesFailed: number;
+	    tablesCancelled?: number;
 	    totalRows: number;
 	    failedTables?: string[];
 	    tableDetails: TableReport[];
@@ -495,6 +496,7 @@ export namespace types {
 	        this.tablesTotal = source["tablesTotal"];
 	        this.tablesSuccess = source["tablesSuccess"];
 	        this.tablesFailed = source["tablesFailed"];
+	        this.tablesCancelled = source["tablesCancelled"];
 	        this.totalRows = source["totalRows"];
 	        this.failedTables = source["failedTables"];
 	        this.tableDetails = this.convertValues(source["tableDetails"], TableReport);
