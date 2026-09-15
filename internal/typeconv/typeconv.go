@@ -104,6 +104,17 @@ var kindAliases = map[string]Kind{
 	"JSON": KindJSON, "JSONB": KindJSON,
 	"UUID": KindUUID,
 	"ENUM": KindEnum, "SET": KindSet,
+
+	// MSSQL 专有类型（缺失会导致 fallback 把原始类型名写进目标 DDL，直接语法错误）
+	"UNIQUEIDENTIFIER": KindUUID,
+	"MONEY":            KindDecimal,
+	"SMALLMONEY":       KindDecimal,
+	"DATETIMEOFFSET":   KindTimestamp,
+	"SQL_VARIANT":      KindVarChar,
+	"SYSNAME":          KindVarChar,
+	"XML":              KindText,
+	"ROWVERSION":       KindBinary,
+	"GUID":             KindUUID,
 }
 
 // Normalize 将源方言的基础类型名归一化为中立类型。
@@ -127,19 +138,28 @@ func toSize(name string, n *int, def int) string {
 // SQLite 驱动直写 time.Time 时会以此形式落入 TEXT 列，目标库无法解析。
 var goTimePattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) [+-]\d{4} [A-Z]+(?: m=[+-][\d.]+)?$`)
 
+// datetimeOffsetPattern 匹配带时区偏移的 datetime 字符串（MSSQL datetimeoffset、
+// 驱动输出的 "2026-09-15 10:00:00 +08:00" 等）。MySQL/SQLite 等目标库不接受
+// 时区后缀，需剥离后写入（时区语义由连接时区决定，迁移工具不换算时间值）。
+var datetimeOffsetPattern = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+[+-]\d{2}:?\d{2}$`)
+
 // sqlDatetimePattern 匹配标准 SQL datetime 字符串（如 2026-08-30 16:35:31）
 var sqlDatetimePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$`)
 
 // LooksLikeDateTime 判断字符串是否为常见 datetime 形态
-// （标准 SQL 格式或 Go time.Time 字符串形式），用于从无类型信息的数据源推断时间列
+// （标准 SQL 格式、带时区偏移格式或 Go time.Time 字符串形式），用于从无类型信息的数据源推断时间列
 func LooksLikeDateTime(v string) bool {
-	return sqlDatetimePattern.MatchString(v) || goTimePattern.MatchString(v)
+	return sqlDatetimePattern.MatchString(v) || goTimePattern.MatchString(v) || datetimeOffsetPattern.MatchString(v)
 }
 
-// NormalizeTimeValue 将 Go 时间字符串形式规范化为标准 SQL datetime 格式（如
-// "2026-08-30 16:35:31 +0000 UTC" → "2026-08-30 16:35:31"）。
+// NormalizeTimeValue 将 Go 时间字符串形式与带时区偏移形式规范化为标准 SQL datetime
+// 格式（如 "2026-08-30 16:35:31 +0000 UTC" → "2026-08-30 16:35:31"、
+// "2026-09-15 10:00:00 +08:00" → "2026-09-15 10:00:00"）。
 // 第二个返回值标识是否发生了转换；非时间字符串原样返回。
 func NormalizeTimeValue(v string) (string, bool) {
+	if m := datetimeOffsetPattern.FindStringSubmatch(v); m != nil {
+		return strings.ReplaceAll(m[1], "T", " "), true
+	}
 	m := goTimePattern.FindStringSubmatch(v)
 	if m == nil {
 		return v, false

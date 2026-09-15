@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/typeconv"
+	types "dbbridge/pkg"
 )
 
 // ProgressCallback 进度回调函数
@@ -39,6 +39,80 @@ type Orchestrator struct {
 	tablesTotal  int
 	backups      []types.BackupInfo
 	tableReports map[int]types.TableReport // 按表序号保存，保证报告顺序稳定
+	pendingFKs   []pendingFK               // 延后添加的外键（数据迁完后统一补建）
+}
+
+// pendingFK 待补建的外键
+type pendingFK struct {
+	table string
+	fk    types.ForeignKeyMeta
+}
+
+// isFKDDLGenerator 判断适配器是否支持延迟外键 DDL 生成
+func isFKDDLGenerator(a types.DatabaseAdapter) bool {
+	_, ok := a.(types.ForeignKeyDDLGenerator)
+	return ok
+}
+
+// applyFKs 数据迁移完成后统一补建延后的外键约束。
+// 单独报告错误（FKErrors）而不让整个迁移失败：外键缺失影响一致性但不丢数据，
+// 用户可依据报告手动修复（如孤儿行导致约束失败）。
+func (o *Orchestrator) applyFKs(ctx context.Context, report *types.MigrationReport) {
+	o.mu.Lock()
+	fks := o.pendingFKs
+	o.pendingFKs = nil
+	o.mu.Unlock()
+
+	if len(fks) == 0 {
+		return
+	}
+	o.log("INFO", "", fmt.Sprintf("开始补建外键约束（共 %d 条）...", len(fks)))
+
+	gen, ok := o.targetAdapter.(types.ForeignKeyDDLGenerator)
+	if !ok {
+		return
+	}
+	for _, p := range fks {
+		if ctx.Err() != nil {
+			return
+		}
+		ddl, err := gen.GenerateAddForeignKeyDDL(p.table, p.fk)
+		if err != nil {
+			msg := fmt.Sprintf("外键 %s.%s: 生成 DDL 失败 - %v", p.table, p.fk.Name, err)
+			o.log("ERROR", p.table, msg)
+			report.FKErrors = append(report.FKErrors, msg)
+			continue
+		}
+		if err := o.targetAdapter.ExecContext(ctx, ddl); err != nil {
+			msg := fmt.Sprintf("外键 %s.%s: 创建失败 - %v（常见原因：子表存在引用列上不存在的父表值）", p.table, p.fk.Name, err)
+			o.log("ERROR", p.table, msg)
+			report.FKErrors = append(report.FKErrors, msg)
+			continue
+		}
+		o.log("INFO", p.table, fmt.Sprintf("外键 %s 创建成功", p.fk.Name))
+	}
+}
+
+// execDDL 按目标方言执行可能包含多条语句/过程体的 DDL：
+//   - PG 系目标：触发器/函数体用美元引号包裹，splitSQL 能正确切分（先建函数再建触发器）；
+//   - MySQL 系/SQLite 目标：过程体（BEGIN...END）内含分号，按分号切分会切碎语句，
+//     依赖 MultiStatements=true 整体执行。
+func (o *Orchestrator) execDDL(ctx context.Context, ddl string) error {
+	switch o.config.Target.Type {
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+		for _, stmt := range splitSQL(ddl) {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return o.targetAdapter.ExecContext(ctx, ddl)
+	}
 }
 
 // NewOrchestrator 创建迁移控制器
@@ -312,6 +386,11 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		return report, fmt.Errorf("迁移已取消")
 	}
 
+	// 4.5 补建延后的外键约束（StructureOnly 模式也需要：建表时刻意未带外键）
+	if !o.config.DataOnly {
+		o.applyFKs(runCtx, report)
+	}
+
 	// 5. 迁移触发器
 	if o.config.MigrateTriggers && o.sourceAdapter != nil {
 		o.migrateTriggers(runCtx, report)
@@ -393,6 +472,20 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 			// 如果既不备份也不删除，且表已存在，建表会失败，让错误自然抛出
 		}
 
+		// 外键延后添加：多表并发迁移时若内联外键，被引用表可能尚未创建而报错。
+		// 支持延迟 DDL 的目标库先建无外键的表，数据全部迁完后统一 ALTER TABLE 补建。
+		deferFK := len(schema.ForeignKeys) > 0 &&
+			o.config.Target.Type != types.SQLite && // SQLite 无法 ALTER ADD CONSTRAINT，只能内联
+			isFKDDLGenerator(o.targetAdapter)
+		if deferFK {
+			o.mu.Lock()
+			for _, fk := range schema.ForeignKeys {
+				o.pendingFKs = append(o.pendingFKs, pendingFK{table: tableName, fk: fk})
+			}
+			o.mu.Unlock()
+			schema.ForeignKeys = nil
+		}
+
 		// 生成并执行建表 SQL（类型已由目标适配器 MapType 完成异构映射）
 		createDDL, err := o.targetAdapter.GenerateCreateTableDDL(schema)
 		if err != nil {
@@ -437,7 +530,8 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 			batchSize = 5000
 		}
 
-		// 主键游标分页：单列主键时使用 keyset（深翻页 O(1)），否则回退 OFFSET
+		// 主键游标分页：单列主键时使用 keyset（深翻页 O(1)）；
+		// 无主键但有单列非空唯一索引时也用 keyset；都无则回退 OFFSET
 		var pkCol string
 		for _, c := range schema.Columns {
 			if c.IsPrimaryKey {
@@ -445,7 +539,27 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 				break
 			}
 		}
+		if pkCol == "" {
+			for _, idx := range schema.Indexes {
+				if !idx.IsUnique || len(idx.Columns) != 1 {
+					continue
+				}
+				for _, c := range schema.Columns {
+					if c.Name == idx.Columns[0] && !c.Nullable {
+						pkCol = c.Name
+						break
+					}
+				}
+				if pkCol != "" {
+					o.log("INFO", tableName, fmt.Sprintf("无主键，使用唯一索引列 %s 做游标分页", pkCol))
+					break
+				}
+			}
+		}
 		useKeyset := pkCol != ""
+		if !useKeyset {
+			o.log("WARN", tableName, "表无主键/可用唯一索引，回退 OFFSET 分页：源库存在并发写入或执行计划变化时可能漏行/重复行，建议迁完后核对行数")
+		}
 
 		var lastKey any
 		offset := 0
@@ -502,6 +616,16 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 		}
 
 		o.log("INFO", tableName, fmt.Sprintf("数据迁移完成, 已迁移 %d 行", processed))
+
+		// 自增序列修复：显式插入自增列不会推进种子（MSSQL IDENTITY / PG SERIAL），
+		// 不修复的话目标库下一条自动 INSERT 会主键冲突。失败只告警不阻断迁移结果。
+		if fixer, ok := o.targetAdapter.(types.SequenceFixer); ok {
+			if err := fixer.FixAutoIncrementSequences(ctx, tableName, schema.Columns); err != nil {
+				o.log("WARN", tableName, fmt.Sprintf("自增序列修复失败（后续 INSERT 可能主键冲突）: %v", err))
+			} else {
+				o.log("INFO", tableName, "自增序列已重置到当前最大值")
+			}
+		}
 	}
 
 	return processed, nil
@@ -548,21 +672,52 @@ func (o *Orchestrator) countRollbacks(reports []types.TableReport) int {
 	return count
 }
 
-// splitSQL 分割多条 SQL 语句（忽略引号内的分号与反斜杠转义）
+// splitSQL 分割多条 SQL 语句（忽略引号内的分号与反斜杠转义；
+// 识别 PG 美元引号 $$...$$ / $tag$...$tag$，函数体内部分号不再误切）
 func splitSQL(sqlText string) []string {
 	var statements []string
 	var current strings.Builder
 	inSingleQuote := false
 	inDoubleQuote := false
 	escaped := false // 单引号内反斜杠转义（MySQL 语义）
+	dollarTag := ""  // 非空表示处于 $tag$...$tag$ 美元引号块内
 
-	for _, ch := range sqlText {
+	for i := 0; i < len(sqlText); i++ {
+		ch := sqlText[i]
+
+		if dollarTag != "" {
+			// 美元引号块内：寻找闭合标记 $tag$
+			current.WriteByte(ch)
+			if ch == '$' && strings.HasPrefix(sqlText[i:], dollarTag) {
+				current.WriteString(dollarTag[1:])
+				i += len(dollarTag) - 1
+				dollarTag = ""
+			}
+			continue
+		}
+
 		if inSingleQuote && escaped {
 			// 转义字符（\' 或 \\）随其后字符原样保留
 			escaped = false
-			current.WriteRune(ch)
+			current.WriteByte(ch)
 			continue
 		}
+
+		// 美元引号开始（PG plpgsql 函数体）：$tag$ 开启，直到匹配的 $tag$
+		if ch == '$' && !inSingleQuote && !inDoubleQuote {
+			if end := strings.IndexByte(sqlText[i+1:], '$'); end >= 0 {
+				tag := "$" + sqlText[i+1:i+1+end] + "$"
+				// 空 tag（$$）或纯标识符 tag 才是美元引号；避免把普通 $ 字符误判
+				if tag == "$$" || isDollarTagIdent(sqlText[i+1:i+1+end]) {
+					dollarTag = tag
+					current.WriteByte(ch)
+					current.WriteString(tag[1:])
+					i += len(tag) - 1
+					continue
+				}
+			}
+		}
+
 		switch ch {
 		case '\'':
 			if !inDoubleQuote {
@@ -586,7 +741,7 @@ func splitSQL(sqlText string) []string {
 				continue
 			}
 		}
-		current.WriteRune(ch)
+		current.WriteByte(ch)
 	}
 
 	// 最后一条语句
@@ -596,6 +751,19 @@ func splitSQL(sqlText string) []string {
 	}
 
 	return statements
+}
+
+// isDollarTagIdent 判断美元引号标签是否为合法标识符（字母/数字/下划线）
+func isDollarTagIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 // truncate 截断字符串用于错误信息展示（按 rune 截断，避免切断多字节 UTF-8 产生乱码）
@@ -648,24 +816,16 @@ func (o *Orchestrator) migrateTriggers(ctx context.Context, report *types.Migrat
 			continue
 		}
 
-		// 分割多条 SQL 语句（PG 触发器需要先建函数再建触发器）
-		for _, stmt := range splitSQL(ddl) {
-			stmt = strings.TrimSpace(stmt)
-			if stmt == "" {
-				continue
-			}
-			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
-				msg := fmt.Sprintf("触发器 %s: 执行失败 - %v (SQL: %s)", trigger.Name, err, truncate(stmt, 120))
-				o.log("ERROR", trigger.Table, msg)
-				report.TriggerErrors = append(report.TriggerErrors, msg)
-				goto nextTrigger
-			}
+		// 按目标方言执行（PG 系逐语句，MySQL 系整体执行避免过程体被分号切碎）
+		if err := o.execDDL(ctx, ddl); err != nil {
+			msg := fmt.Sprintf("触发器 %s: 执行失败 - %v (SQL: %s)", trigger.Name, err, truncate(ddl, 120))
+			o.log("ERROR", trigger.Table, msg)
+			report.TriggerErrors = append(report.TriggerErrors, msg)
+			continue
 		}
 
 		report.TriggersMigrated++
 		o.log("INFO", trigger.Table, fmt.Sprintf("触发器 %s 迁移成功", trigger.Name))
-
-	nextTrigger:
 	}
 
 	o.log("INFO", "", fmt.Sprintf("触发器迁移完成: 成功 %d, 失败 %d", report.TriggersMigrated, len(report.TriggerErrors)))
@@ -701,24 +861,16 @@ func (o *Orchestrator) migrateRoutines(ctx context.Context, report *types.Migrat
 			continue
 		}
 
-		// 分割多条 SQL 语句
-		for _, stmt := range splitSQL(ddl) {
-			stmt = strings.TrimSpace(stmt)
-			if stmt == "" {
-				continue
-			}
-			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
-				msg := fmt.Sprintf("存储过程 %s: 执行失败 - %v (SQL: %s)", routine.Name, err, truncate(stmt, 120))
-				o.log("ERROR", "", msg)
-				report.RoutineErrors = append(report.RoutineErrors, msg)
-				goto nextRoutine
-			}
+		// 按目标方言执行（同触发器：PG 系逐语句，MySQL 系整体执行）
+		if err := o.execDDL(ctx, ddl); err != nil {
+			msg := fmt.Sprintf("存储过程 %s: 执行失败 - %v (SQL: %s)", routine.Name, err, truncate(ddl, 120))
+			o.log("ERROR", "", msg)
+			report.RoutineErrors = append(report.RoutineErrors, msg)
+			continue
 		}
 
 		report.RoutinesMigrated++
 		o.log("INFO", "", fmt.Sprintf("存储过程 %s 迁移成功", routine.Name))
-
-	nextRoutine:
 	}
 
 	o.log("INFO", "", fmt.Sprintf("存储过程迁移完成: 成功 %d, 失败 %d", report.RoutinesMigrated, len(report.RoutineErrors)))

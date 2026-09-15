@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -33,25 +34,33 @@ func init() {
 
 // Connect 连接 MSSQL 数据库
 //
-// DSN 格式：server=tcp:host,port;user id=sa;password=xxx;database=db;encrypt=disable
-// 命名实例：用户可填 Instance 字段（如 SQLEXPRESS），此时 DSN 中 port 留空，
+// 使用 URL 形式连接串（sqlserver://user:pass@host:port?database=db），
+// url.UserPassword 会自动编码密码中的特殊字符（; ' @ 等），
+// 避免旧拼接式 DSN 被特殊字符密码破坏。
+// 命名实例：用户可填 Instance 字段（如 SQLEXPRESS），此时不带端口，
 // 由 go-mssqldb 通过 SQL Server Browser 服务解析实例端口。
 func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) error {
-	var server string
-	if config.Instance != "" {
-		// 命名实例：server=host\INSTANCE（不带端口，由驱动自动解析）
-		server = fmt.Sprintf("%s\\%s", config.Host, config.Instance)
-	} else if config.Port > 0 {
-		server = fmt.Sprintf("%s:%d", config.Host, config.Port)
-	} else {
-		server = config.Host
+	if strings.TrimSpace(config.Database) == "" {
+		return fmt.Errorf("MSSQL: 未指定数据库名")
 	}
 
-	// 构建连接字符串
-	dsn := fmt.Sprintf("server=tcp:%s;user id=%s;password=%s;database=%s;encrypt=disable",
-		server, config.Username, config.Password, config.Database)
+	dsn := &url.URL{Scheme: "sqlserver"}
+	if config.Instance != "" {
+		// 命名实例：sqlserver://user:pass@host/INSTANCE
+		dsn.Host = config.Host
+		dsn.Path = "/" + config.Instance
+	} else if config.Port > 0 {
+		dsn.Host = fmt.Sprintf("%s:%d", config.Host, config.Port)
+	} else {
+		dsn.Host = config.Host
+	}
+	dsn.User = url.UserPassword(config.Username, config.Password)
+	q := url.Values{}
+	q.Set("database", config.Database)
+	q.Set("encrypt", "disable")
+	dsn.RawQuery = q.Encode()
 
-	db, err := sql.Open("sqlserver", dsn)
+	db, err := sql.Open("sqlserver", dsn.String())
 	if err != nil {
 		return fmt.Errorf("MSSQL: 打开数据库失败: %w", err)
 	}
@@ -178,6 +187,16 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 			BaseType: strings.ToUpper(dataType),
 			Nullable: nullable == "YES",
 			Comment:  comment.String,
+		}
+
+		// MSSQL 的 timestamp 类型是 rowversion（8 字节行版本二进制），
+		// 与其他数据库的 TIMESTAMP 语义完全不同；不纠正会被映射成目标库的
+		// 时间类型（MySQL TIMESTAMP/PG timestamp），写入必然失败。
+		if col.BaseType == "TIMESTAMP" || col.BaseType == "ROWVERSION" {
+			col.BaseType = "VARBINARY"
+			col.DataType = "rowversion"
+			l := 8
+			col.Length = &l
 		}
 
 		if colDefault.Valid && colDefault.String != "" {
@@ -463,8 +482,9 @@ func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, erro
 // BackupTable 将表重命名为备份表名
 func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
 	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
+	// sp_rename 参数是字符串字面量，内层用方括号包裹标识符（escapeIdent 已双写 ]）
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("sp_rename '%s', '%s'", escapeIdent(tableName), escapeIdent(backupName)))
+		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(tableName), escapeIdent(backupName)))
 	if err != nil {
 		return "", fmt.Errorf("MSSQL: 备份表失败 (%s→%s): %w", tableName, backupName, err)
 	}
@@ -482,7 +502,7 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 		}
 	}
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("sp_rename '%s', '%s'", escapeIdent(backupName), escapeIdent(originalName)))
+		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(backupName), escapeIdent(originalName)))
 	if err != nil {
 		return fmt.Errorf("MSSQL: 恢复备份失败 (%s→%s): %w", backupName, originalName, err)
 	}
@@ -669,8 +689,27 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		return fmt.Errorf("MSSQL: 开启事务失败: %w", err)
 	}
 
+	// 迁移会显式插入 IDENTITY 列的值，默认 OFF 会直接报错
+	// （Error 544: Cannot insert explicit value for identity column...）。
+	// SET IDENTITY_INSERT 是会话级设置，必须与 INSERT 在同一事务（同一连接）内执行；
+	// 且同一会话同时只能对一张表开启，结束后必须在同一连接上关闭，
+	// 否则连接归还池后会污染后续其他表的写入。
+	identityOn := false
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT [%s] ON", escapeIdent(tableName))); err == nil {
+		identityOn = true
+	}
+	// turnOff 在同一连接上关闭 IDENTITY_INSERT；必须在 Commit/Rollback 之前调用
+	// （事务完成后 tx.Exec 会返回 ErrTxDone 不再执行）
+	turnOffIdentity := func() {
+		if identityOn {
+			// 用独立 ctx 避免 ctx 已取消时漏关
+			_, _ = tx.ExecContext(context.Background(), fmt.Sprintf("SET IDENTITY_INSERT [%s] OFF", escapeIdent(tableName)))
+		}
+	}
+
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
+		turnOffIdentity()
 		tx.Rollback()
 		return fmt.Errorf("MSSQL: 预处理失败: %w", err)
 	}
@@ -686,11 +725,13 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 			}
 		}
 		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+			turnOffIdentity()
 			tx.Rollback()
 			return fmt.Errorf("MSSQL: 写入数据失败: %w", err)
 		}
 	}
 
+	turnOffIdentity()
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("MSSQL: 提交事务失败: %w", err)
 	}
@@ -877,6 +918,62 @@ func schemaColumnNames(schema types.TableSchema) []string {
 		cols = append(cols, c.Name)
 	}
 	return cols
+}
+
+// GenerateAddForeignKeyDDL 生成 "ALTER TABLE ... ADD CONSTRAINT ..."（外键延后添加用）
+func (a *Adapter) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMeta) (string, error) {
+	fkName := fk.Name
+	if fkName == "" {
+		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("ALTER TABLE [%s] ADD CONSTRAINT [%s] FOREIGN KEY (",
+		escapeIdent(tableName), escapeIdent(fkName)))
+	for i, c := range fk.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("[%s]", escapeIdent(c)))
+	}
+	sb.WriteString(fmt.Sprintf(") REFERENCES [%s] (", escapeIdent(fk.RefTable)))
+	for i, c := range fk.RefColumns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("[%s]", escapeIdent(c)))
+	}
+	sb.WriteString(")")
+	if fk.OnDelete != "" && !strings.EqualFold(fk.OnDelete, "no_action") {
+		sb.WriteString(" ON DELETE " + strings.ToUpper(fk.OnDelete))
+	}
+	if fk.OnUpdate != "" && !strings.EqualFold(fk.OnUpdate, "no_action") {
+		sb.WriteString(" ON UPDATE " + strings.ToUpper(fk.OnUpdate))
+	}
+	return sb.String(), nil
+}
+
+// FixAutoIncrementSequences 将 IDENTITY 种子重置到当前最大值。
+//
+// 显式插入 IDENTITY 列的值不会推进种子，不修复的话目标库下一条自动
+// INSERT 会与已迁入数据主键冲突（Error 2627）。
+func (a *Adapter) FixAutoIncrementSequences(ctx context.Context, tableName string, columns []types.ColumnMeta) error {
+	hasIdentity := false
+	for _, c := range columns {
+		if c.AutoIncrement {
+			hasIdentity = true
+			break
+		}
+	}
+	if !hasIdentity {
+		return nil
+	}
+	// RESEED 不带新值时：表非空则种子重置为该列当前最大值，空表重置为初始值
+	_, err := a.db.ExecContext(ctx,
+		fmt.Sprintf("DBCC CHECKIDENT ('[dbo].[%s]', RESEED)", escapeIdent(tableName)))
+	if err != nil {
+		return fmt.Errorf("MSSQL: 重置 IDENTITY 种子失败: %w", err)
+	}
+	return nil
 }
 
 // escapeIdent 转义 MSSQL 标识符（方括号内右方括号双写）

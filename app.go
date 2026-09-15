@@ -57,26 +57,26 @@ type GetTablesResult struct {
 
 // GetTableSchemaResult 获取表结构结果
 type GetTableSchemaResult struct {
-	Success bool              `json:"success"`
+	Success bool               `json:"success"`
 	Schema  *types.TableSchema `json:"schema,omitempty"`
-	Error   string            `json:"error,omitempty"`
+	Error   string             `json:"error,omitempty"`
 }
 
 // StartMigrationRequest 开始迁移请求
 type StartMigrationRequest struct {
-	Source            ConnectionRequest `json:"source"`
-	Target            ConnectionRequest `json:"target"`
-	Tables            []string          `json:"tables,omitempty"`
-	StructureOnly     bool              `json:"structureOnly"`
-	DataOnly          bool              `json:"dataOnly"`
-	BatchSize         int               `json:"batchSize"`
-	Concurrency       int               `json:"concurrency"`
-	DropIfExists      bool              `json:"dropIfExists"`
-	IgnoreErrors      bool              `json:"ignoreErrors"`
-	BackupBefore      bool              `json:"backupBefore"`
-	AutoRollback      bool              `json:"autoRollback"`
-	MigrateTriggers   bool              `json:"migrateTriggers"`
-	MigrateRoutines   bool              `json:"migrateRoutines"`
+	Source          ConnectionRequest `json:"source"`
+	Target          ConnectionRequest `json:"target"`
+	Tables          []string          `json:"tables,omitempty"`
+	StructureOnly   bool              `json:"structureOnly"`
+	DataOnly        bool              `json:"dataOnly"`
+	BatchSize       int               `json:"batchSize"`
+	Concurrency     int               `json:"concurrency"`
+	DropIfExists    bool              `json:"dropIfExists"`
+	IgnoreErrors    bool              `json:"ignoreErrors"`
+	BackupBefore    bool              `json:"backupBefore"`
+	AutoRollback    bool              `json:"autoRollback"`
+	MigrateTriggers bool              `json:"migrateTriggers"`
+	MigrateRoutines bool              `json:"migrateRoutines"`
 }
 
 // SimpleResult 通用操作结果
@@ -91,8 +91,8 @@ type SimpleResult struct {
 
 // App 主应用结构
 type App struct {
-	ctx              context.Context
-	store            *history.Store
+	ctx               context.Context
+	store             *history.Store
 	connectionService *service.ConnectionService
 	migrationService  *service.MigrationService
 	backupService     *service.BackupService
@@ -184,19 +184,19 @@ func (a *App) GetSupportedDatabases() []string {
 // StartMigration 开始迁移（阻塞执行，进度通过事件推送）
 func (a *App) StartMigration(req StartMigrationRequest) *types.MigrationReport {
 	config := types.MigrationConfig{
-		Source:            toConfig(req.Source),
-		Target:            toConfig(req.Target),
-		Tables:            req.Tables,
-		StructureOnly:     req.StructureOnly,
-		DataOnly:          req.DataOnly,
-		BatchSize:         req.BatchSize,
-		Concurrency:       req.Concurrency,
-		DropIfExists:      req.DropIfExists,
-		IgnoreErrors:      req.IgnoreErrors,
-		BackupBefore:      req.BackupBefore,
-		AutoRollback:      req.AutoRollback,
-		MigrateTriggers:   req.MigrateTriggers,
-		MigrateRoutines:   req.MigrateRoutines,
+		Source:          toConfig(req.Source),
+		Target:          toConfig(req.Target),
+		Tables:          req.Tables,
+		StructureOnly:   req.StructureOnly,
+		DataOnly:        req.DataOnly,
+		BatchSize:       req.BatchSize,
+		Concurrency:     req.Concurrency,
+		DropIfExists:    req.DropIfExists,
+		IgnoreErrors:    req.IgnoreErrors,
+		BackupBefore:    req.BackupBefore,
+		AutoRollback:    req.AutoRollback,
+		MigrateTriggers: req.MigrateTriggers,
+		MigrateRoutines: req.MigrateRoutines,
 	}
 
 	report, err := a.migrationService.Run(config,
@@ -237,7 +237,15 @@ func (a *App) saveHistory(req StartMigrationRequest, report *types.MigrationRepo
 	}
 
 	status := "success"
-	if migErr != nil {
+	// 迁移被拒绝/中止时 orchestrator 返回 (report, err)，report.Error 已带原因；
+	// 也有 err==nil 但 report.Error 非空的路径（如取消），都要落为失败，不能写假 success
+	if report.Error != "" {
+		if report.TablesSuccess > 0 {
+			status = "partial"
+		} else {
+			status = "failed"
+		}
+	} else if migErr != nil {
 		if report.TablesSuccess > 0 {
 			status = "partial"
 		} else {
@@ -327,9 +335,9 @@ func (a *App) DeleteMigrationHistory(id int64) SimpleResult {
 
 // GetBackupTablesResult 获取备份表列表结果
 type GetBackupTablesResult struct {
-	Success bool                       `json:"success"`
-	Tables  []service.BackupTableItem  `json:"tables,omitempty"`
-	Error   string                     `json:"error,omitempty"`
+	Success bool                      `json:"success"`
+	Tables  []service.BackupTableItem `json:"tables,omitempty"`
+	Error   string                    `json:"error,omitempty"`
 }
 
 // GetBackupTables 获取目标库中所有备份表（以 _bak_ 开头的表）

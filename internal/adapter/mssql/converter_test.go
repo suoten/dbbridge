@@ -259,19 +259,19 @@ func TestConvertInsertedDeletedToNewOld(t *testing.T) {
 }
 
 func TestConvertAtVariablesToMySQL(t *testing.T) {
-	input := "SET @count = 10; SELECT @count"
-	result := convertAtVariablesToMySQL(input)
+	body := "SET @count = 10; SELECT @count"
+	decls := convertAtVariablesToMySQL(&body)
 
 	// @count → v_count
-	if strings.Contains(result, "@count") {
-		t.Errorf("仍包含 @count: %s", result)
+	if strings.Contains(body, "@count") {
+		t.Errorf("仍包含 @count: %s", body)
 	}
-	if !strings.Contains(result, "v_count") {
-		t.Errorf("未转换为 v_count: %s", result)
+	if !strings.Contains(body, "v_count") {
+		t.Errorf("未转换为 v_count: %s", body)
 	}
-	// 应包含 DECLARE 语句
-	if !strings.Contains(result, "DECLARE v_count") {
-		t.Errorf("未生成 DECLARE: %s", result)
+	// 声明段应包含 DECLARE 语句
+	if !strings.Contains(decls, "DECLARE v_count") {
+		t.Errorf("未生成 DECLARE: %s", decls)
 	}
 }
 
@@ -357,7 +357,8 @@ SELECT LEN('abc')
 SELECT ISNULL(NULL, 0)
 SELECT SCOPE_IDENTITY()`
 
-	result := convertMSSQLBodyToMySQL(input)
+	body, _ := convertMSSQLBodyToMySQL(input)
+	result := body
 
 	// GETUTCDATE → UTC_TIMESTAMP
 	if strings.Contains(strings.ToUpper(result), "GETUTCDATE") {
@@ -390,7 +391,8 @@ SELECT GETUTCDATE()
 SELECT LEN('abc')
 SELECT ISNULL(NULL, 0)`
 
-	result := convertMSSQLBodyToPG(input)
+	body, _ := convertMSSQLBodyToPG(input)
+	result := body
 
 	// GETUTCDATE → NOW() AT TIME ZONE 'UTC'
 	if strings.Contains(strings.ToUpper(result), "GETUTCDATE") {

@@ -2,8 +2,8 @@
 package oceanbase
 
 import (
-	types "dbbridge/pkg"
 	"dbbridge/internal/adapter/mysqlcompat"
+	types "dbbridge/pkg"
 )
 
 func init() {

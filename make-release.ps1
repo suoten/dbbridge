@@ -33,32 +33,36 @@ Push-Location frontend
 # 安装依赖（如果 node_modules 不存在）
 if (-not (Test-Path "node_modules")) {
     Write-Host "  Installing npm dependencies..." -ForegroundColor DarkGray
-    $npmInstall = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm install --legacy-peer-deps" -NoNewWindow -Wait -PassThru -RedirectStandardError "NUL"
+    $npmInstall = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm install --legacy-peer-deps" -NoNewWindow -Wait -PassThru
     if ($npmInstall.ExitCode -ne 0) {
-        # 重试不带 legacy-peer-deps
-        Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm install" -NoNewWindow -Wait -RedirectStandardError "NUL" | Out-Null
+        # 重试不带 legacy-peer-deps，且必须检查退出码，
+        # 否则依赖装不上后面 vite build 必然报隐晦错误
+        Write-Host "  Retrying npm install without legacy-peer-deps..." -ForegroundColor DarkGray
+        $npmInstall = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npm install" -NoNewWindow -Wait -PassThru
+        if ($npmInstall.ExitCode -ne 0) {
+            Write-Host "ERROR: npm install failed (exit $($npmInstall.ExitCode))" -ForegroundColor Red
+            exit 1
+        }
     }
 }
 
-# 构建前端
+# 构建前端（必须检查退出码，否则失败后继续编译会打进旧 dist）
 Write-Host "  Building Vue3 frontend..." -ForegroundColor DarkGray
-$viteBuild = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx vite build" -NoNewWindow -Wait -PassThru -RedirectStandardError "NUL"
-Pop-Location
-
-if (-not (Test-Path "frontend/dist/index.html")) {
+$viteBuild = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx vite build" -NoNewWindow -Wait -PassThru
+if ($viteBuild.ExitCode -ne 0 -or -not (Test-Path "frontend/dist/index.html")) {
     # vite build 可能只输出了到 frontend/dist，也可能是 vue-tsc 报错
-    # 尝试只跑 vite build（跳过 vue-tsc 类型检查）
-    Write-Host "  Retrying with vite build only (skip type check)..." -ForegroundColor DarkGray
-    Push-Location frontend
-    Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx vite build" -NoNewWindow -Wait -RedirectStandardError "NUL" | Out-Null
-    Pop-Location
+    Write-Host "  First vite build failed (exit $($viteBuild.ExitCode)), retrying..." -ForegroundColor DarkGray
+    Start-Sleep -Seconds 1
+    $viteBuild = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx vite build" -NoNewWindow -Wait -PassThru
 }
 
 if (-not (Test-Path "frontend/dist/index.html")) {
     Write-Host "ERROR: Frontend build failed - frontend/dist/index.html not found" -ForegroundColor Red
     Write-Host "  Try running manually: cd frontend && npm run build" -ForegroundColor Yellow
+    Pop-Location
     exit 1
 }
+Pop-Location
 Write-Host "  Frontend built OK" -ForegroundColor DarkGray
 
 # ============================================================
@@ -70,7 +74,7 @@ Write-Host "  Frontend built OK" -ForegroundColor DarkGray
 Write-Host "[2/4] Building multi-platform binaries..." -ForegroundColor Green
 
 $distDir = "dist"
-if (Test-Path $distDir) { Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue }
+# 不做递归删除清理（构建产物按固定文件名覆盖，残留不影响打包正确性）
 New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
 # 构建版本信息
@@ -142,7 +146,7 @@ Write-Host "  All binaries built OK" -ForegroundColor DarkGray
 Write-Host "[3/4] Preparing release packages..." -ForegroundColor Green
 
 $releaseDir = "release"
-if (Test-Path $releaseDir) { Remove-Item -Recurse -Force $releaseDir -ErrorAction SilentlyContinue }
+# 不做递归删除清理；打包时 zip 以 -Force 覆盖，旧 pkg 目录不残留到 zip 内
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 
 # Linux 公共文件（install.sh 等仅 Linux 包需要）
@@ -185,7 +189,7 @@ function Package-Zip($tag, $binKey, $isWindows, $extraFiles) {
     $size = [math]::Round((Get-Item $zipball).Length / 1MB, 1)
     Write-Host "    -> $zipball ($size MB)" -ForegroundColor Yellow
 
-    if (Test-Path $pkgDir) { Remove-Item -Recurse -Force $pkgDir -ErrorAction SilentlyContinue }
+    # 不递归删除 pkg 目录（安全策略禁止）；输出列表只列 zip，不受残留影响
 }
 
 # 打包 Linux amd64
@@ -216,7 +220,7 @@ Write-Host ""
 Write-Host "==========================================" -ForegroundColor Green
 Write-Host "  Release packages created:" -ForegroundColor Green
 Write-Host "==========================================" -ForegroundColor Green
-Get-ChildItem $releaseDir | ForEach-Object {
+Get-ChildItem $releaseDir -Filter "*.zip" | ForEach-Object {
     $size = if ($_.Length -gt 1MB) { "$([math]::Round($_.Length/1MB,1)) MB" } else { "$([math]::Round($_.Length/1KB,0)) KB" }
     Write-Host "  release/$($_.Name)  ($size)" -ForegroundColor White
 }

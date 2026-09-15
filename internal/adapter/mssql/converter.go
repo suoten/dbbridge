@@ -39,10 +39,17 @@ func convertMSSQLTriggerToMySQL(trigger types.TriggerMeta) string {
 		trigger.Name, trigger.Timing, primaryEvent, trigger.Table))
 	sb.WriteString("BEGIN\n")
 
-	// 转换触发器体
+	// 转换触发器体。
+	// 注意：MSSQL 源库的 Body 是完整 OBJECT_DEFINITION（含 CREATE TRIGGER ... AS 头），
+	// 必须先剥离头部，否则会嵌套出非法 SQL
 	body := trigger.Body
 	if body != "" {
-		body = convertMSSQLBodyToMySQL(body)
+		body = stripMSSQLTriggerBody(body)
+		body, decls := convertMSSQLBodyToMySQL(body)
+		if decls != "" {
+			sb.WriteString(decls)
+			sb.WriteString("\n")
+		}
 		sb.WriteString(body)
 	}
 
@@ -67,11 +74,22 @@ func convertMSSQLTriggerToPG(trigger types.TriggerMeta) string {
 
 	// PG 需要先创建函数，再创建触发器
 	sb.WriteString(fmt.Sprintf("CREATE OR REPLACE FUNCTION \"%s_fn\"() RETURNS TRIGGER AS $$\n", trigger.Name))
-	sb.WriteString("BEGIN\n")
 
+	// 转换触发器体（剥离 CREATE TRIGGER 头，见 convertMSSQLTriggerToMySQL 注释）
 	body := trigger.Body
+	var decls string
 	if body != "" {
-		body = convertMSSQLBodyToPG(body)
+		body = stripMSSQLTriggerBody(body)
+		body, decls = convertMSSQLBodyToPG(body)
+	}
+	// plpgsql 中 DECLARE 必须在 BEGIN 之前
+	if decls != "" {
+		sb.WriteString("DECLARE\n")
+		sb.WriteString(decls)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("BEGIN\n")
+	if body != "" {
 		sb.WriteString(body)
 	}
 
@@ -102,7 +120,8 @@ func convertMSSQLTriggerToSQLite(trigger types.TriggerMeta) string {
 
 	body := trigger.Body
 	if body != "" {
-		body = convertMSSQLBodyToMySQL(body) // SQLite 语法接近 MySQL
+		// SQLite 无 DECLARE/局部变量，声明段丢弃（近似转换，@var 引用保留为 v_var 名）
+		body, _ = convertMSSQLBodyToMySQL(body) // SQLite 语法接近 MySQL
 		sb.WriteString(body)
 	}
 
@@ -125,8 +144,8 @@ func convertMSSQLRoutineToMySQL(routine types.RoutineMeta) string {
 	// 移除 MSSQL 的 CREATE PROCEDURE 头部，只保留过程体
 	body = stripMSSQLRoutineHeader(body)
 
-	// 转换 T-SQL 语法到 MySQL
-	body = convertMSSQLBodyToMySQL(body)
+	// 转换 T-SQL 语法到 MySQL（变量声明需放在 BEGIN 块内）
+	body, decls := convertMSSQLBodyToMySQL(body)
 
 	if routine.Type == "function" {
 		returns := routine.Returns
@@ -136,14 +155,16 @@ func convertMSSQLRoutineToMySQL(routine types.RoutineMeta) string {
 		sb.WriteString(fmt.Sprintf("CREATE FUNCTION `%s`() RETURNS %s\n", routine.Name, returns))
 		sb.WriteString("DETERMINISTIC\n")
 		sb.WriteString("BEGIN\n")
-		sb.WriteString(body)
-		sb.WriteString("\nEND")
 	} else {
 		sb.WriteString(fmt.Sprintf("CREATE PROCEDURE `%s`()\n", routine.Name))
 		sb.WriteString("BEGIN\n")
-		sb.WriteString(body)
-		sb.WriteString("\nEND")
 	}
+	if decls != "" {
+		sb.WriteString(decls)
+		sb.WriteString("\n")
+	}
+	sb.WriteString(body)
+	sb.WriteString("\nEND")
 
 	return sb.String()
 }
@@ -160,8 +181,8 @@ func convertMSSQLRoutineToPG(routine types.RoutineMeta) string {
 	// 移除 MSSQL 的 CREATE PROCEDURE 头部
 	body = stripMSSQLRoutineHeader(body)
 
-	// 转换 T-SQL 语法到 PL/pgSQL
-	body = convertMSSQLBodyToPG(body)
+	// 转换 T-SQL 语法到 PL/pgSQL（变量声明需放在 $$ 与 BEGIN 之间的 DECLARE 段）
+	body, decls := convertMSSQLBodyToPG(body)
 
 	if routine.Type == "function" {
 		returns := routine.Returns
@@ -169,30 +190,33 @@ func convertMSSQLRoutineToPG(routine types.RoutineMeta) string {
 			returns = "TEXT"
 		}
 		sb.WriteString(fmt.Sprintf("CREATE OR REPLACE FUNCTION \"%s\"() RETURNS %s AS $$\n", routine.Name, returns))
-		sb.WriteString("BEGIN\n")
-		sb.WriteString(body)
-		sb.WriteString("\nEND;\n$$ LANGUAGE plpgsql;")
 	} else {
 		sb.WriteString(fmt.Sprintf("CREATE OR REPLACE PROCEDURE \"%s\"() AS $$\n", routine.Name))
-		sb.WriteString("BEGIN\n")
-		sb.WriteString(body)
-		sb.WriteString("\nEND;\n$$ LANGUAGE plpgsql;")
 	}
+	if decls != "" {
+		sb.WriteString("DECLARE\n")
+		sb.WriteString(decls)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("BEGIN\n")
+	sb.WriteString(body)
+	sb.WriteString("\nEND;\n$$ LANGUAGE plpgsql;")
 
 	return sb.String()
 }
 
 // ============ T-SQL → 目标方言 语法转换 ============
 
-// convertMSSQLBodyToMySQL 将 T-SQL 过程体转换为 MySQL 兼容语法
-func convertMSSQLBodyToMySQL(body string) string {
+// convertMSSQLBodyToMySQL 将 T-SQL 过程体转换为 MySQL 兼容语法。
+// 第二个返回值是需要插入到 BEGIN 块开头的变量声明段（MySQL 的 DECLARE 必须在块内）。
+func convertMSSQLBodyToMySQL(body string) (string, string) {
 	result := body
 
 	// 1. inserted/deleted 伪表 → NEW/OLD
 	result = convertInsertedDeletedToNewOld(result, "mysql")
 
-	// 2. @变量 → 局部变量声明（MySQL 中用 DECLARE v_name ...）
-	result = convertAtVariablesToMySQL(result)
+	// 2. @变量 → 局部变量声明（MySQL 中用 DECLARE v_name ...），返回声明段由调用方插入 BEGIN 内
+	decls := convertAtVariablesToMySQL(&result)
 
 	// 3. SET @var = → SET var =
 	result = convertSetAtVar(result)
@@ -230,18 +254,19 @@ func convertMSSQLBodyToMySQL(body string) string {
 
 	// 14. 去除 MSSQL 的 BEGIN/END 嵌套标记（MySQL 也支持，保留）
 
-	return result
+	return result, decls
 }
 
-// convertMSSQLBodyToPG 将 T-SQL 过程体转换为 PL/pgSQL 兼容语法
-func convertMSSQLBodyToPG(body string) string {
+// convertMSSQLBodyToPG 将 T-SQL 过程体转换为 PL/pgSQL 兼容语法。
+// 第二个返回值是需要插入到 DECLARE 段的变量声明（plpgsql 要求 DECLARE 在 BEGIN 之前）。
+func convertMSSQLBodyToPG(body string) (string, string) {
 	result := body
 
 	// 1. inserted/deleted 伪表 → NEW/OLD
 	result = convertInsertedDeletedToNewOld(result, "pg")
 
-	// 2. @变量 → 普通变量（PG 中不需要 @ 前缀）
-	result = convertAtVariablesToPG(result)
+	// 2. @变量 → 普通变量（PG 中不需要 @ 前缀），返回声明段由调用方插入 DECLARE 段
+	decls := convertAtVariablesToPG(&result)
 
 	// 3. SET @var = → var :=
 	result = convertSetAtVarPG(result)
@@ -283,7 +308,7 @@ func convertMSSQLBodyToPG(body string) string {
 	// PG 使用 || 连接字符串，但需要类型判断，这里保持 + 不变（数值运算）
 	// 如需字符串连接，用户需手动调整
 
-	return result
+	return result, decls
 }
 
 // ============ 辅助函数 ============
@@ -312,38 +337,35 @@ func convertInsertedDeletedToNewOld(body, dialect string) string {
 	return result
 }
 
-// convertAtVariablesToMySQL 将 MSSQL @变量转换为 MySQL 局部变量声明
-func convertAtVariablesToMySQL(body string) string {
-	// 收集所有 @变量名
+// convertAtVariablesToMySQL 将 MSSQL @变量收集为 MySQL 局部变量声明，
+// 并把 body 中的 @var 原地替换为 v_var。声明段由调用方插入到 BEGIN 块开头
+// （MySQL 要求 DECLARE 位于块内首部，不能出现在 BEGIN 之前）。
+func convertAtVariablesToMySQL(body *string) string {
 	varRe := regexp.MustCompile(`@(\w+)`)
-	matches := varRe.FindAllStringSubmatch(body, -1)
+	matches := varRe.FindAllStringSubmatch(*body, -1)
 
 	seen := make(map[string]bool)
 	var declarations []string
 	for _, m := range matches {
 		if len(m) >= 2 && !seen[m[1]] {
 			seen[m[1]] = true
-			declarations = append(declarations, fmt.Sprintf("DECLARE v_%s VARCHAR(4000);", m[1]))
+			// 统一用 TEXT 承载任意类型值，避免 VARCHAR(4000) 截断
+			declarations = append(declarations, fmt.Sprintf("DECLARE v_%s TEXT;", m[1]))
 		}
 	}
 
-	// 将 @var 替换为 v_var
-	result := varRe.ReplaceAllStringFunc(body, func(s string) string {
+	*body = varRe.ReplaceAllStringFunc(*body, func(s string) string {
 		return "v_" + s[1:]
 	})
 
-	// 在过程体开头插入声明
-	if len(declarations) > 0 {
-		result = strings.Join(declarations, "\n") + "\n" + result
-	}
-
-	return result
+	return strings.Join(declarations, "\n")
 }
 
-// convertAtVariablesToPG 将 MSSQL @变量转换为 PG 变量（去掉 @ 前缀，加 v_ 前缀）
-func convertAtVariablesToPG(body string) string {
+// convertAtVariablesToPG 将 MSSQL @变量收集为 PG 变量声明（去掉 @ 前缀，加 v_ 前缀），
+// 声明段由调用方插入到 DECLARE 段。
+func convertAtVariablesToPG(body *string) string {
 	varRe := regexp.MustCompile(`@(\w+)`)
-	matches := varRe.FindAllStringSubmatch(body, -1)
+	matches := varRe.FindAllStringSubmatch(*body, -1)
 
 	seen := make(map[string]bool)
 	var declarations []string
@@ -354,15 +376,11 @@ func convertAtVariablesToPG(body string) string {
 		}
 	}
 
-	result := varRe.ReplaceAllStringFunc(body, func(s string) string {
+	*body = varRe.ReplaceAllStringFunc(*body, func(s string) string {
 		return "v_" + s[1:]
 	})
 
-	if len(declarations) > 0 {
-		result = strings.Join(declarations, "\n") + "\n" + result
-	}
-
-	return result
+	return strings.Join(declarations, "\n")
 }
 
 // convertSetAtVar 将 SET @var = expr 转换为 SET var = expr
@@ -433,5 +451,21 @@ func stripMSSQLRoutineHeader(body string) string {
 	if loc != nil {
 		return strings.TrimSpace(body[loc[1]:])
 	}
+	return body
+}
+
+// stripMSSQLTriggerBody 从完整触发器定义中剥离 CREATE TRIGGER ... AS 头部。
+// MSSQL 的 GetTriggers 返回的 Body 是 OBJECT_DEFINITION 全文，形如：
+//
+//	CREATE TRIGGER [tg] ON [tbl] AFTER INSERT AS BEGIN ... END
+//
+// 或 CREATE OR ALTER TRIGGER ...；若不剥离，转换产物会嵌套非法 SQL。
+func stripMSSQLTriggerBody(body string) string {
+	re := regexp.MustCompile(`(?is)^\s*CREATE\s+(?:OR\s+ALTER\s+)?TRIGGER\s+.*?\bAS\b`)
+	loc := re.FindStringIndex(body)
+	if loc != nil {
+		return strings.TrimSpace(body[loc[1]:])
+	}
+	// 已是裸过程体（如来自 information_schema）则原样返回
 	return body
 }

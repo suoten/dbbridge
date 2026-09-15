@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/adapter/sqlite"
+	types "dbbridge/pkg"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
 )
@@ -22,9 +22,14 @@ func TestNormalizePGDefault(t *testing.T) {
 		{`'0'::numeric`, `'0'`},
 		{`0.00`, `0.00`},
 		{`now()`, `now()`},
-		{`now()::timestamp`, `now()::timestamp`},
+		// 函数式默认值剥掉尾部 cast：now()::timestamp 原样写进 MySQL 是语法错误
+		{`now()::timestamp`, `now()`},
 		{`CURRENT_TIMESTAMP`, `CURRENT_TIMESTAMP`},
+		// 括号内的 ::（函数参数里的 cast）不能剥，否则函数调用被切碎
 		{`nextval('users_id_seq'::regclass)`, `nextval('users_id_seq'::regclass)`},
+		// 字面量内含 :: 的不是类型转换，保留原值
+		{`'a::b'::text`, `'a::b'`},
+		{`'a::b'`, `'a::b'`},
 	}
 	for _, c := range cases {
 		if got := normalizePGDefault(c.in); got != c.want {

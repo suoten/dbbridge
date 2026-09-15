@@ -23,12 +23,35 @@ jobs:
         with:
           go-version: '1.25'
 
+      # 前端必须先构建：main.go 的 //go:embed all:frontend/dist
+      # 要求 dist 目录存在，缺了 go build 直接报错（此前 CI 必红的原因）
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        working-directory: frontend
+        shell: bash
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+          else
+            npm install --legacy-peer-deps
+          fi
+          npx vite build
+          test -f dist/index.html || { echo "frontend/dist/index.html missing"; exit 1; }
+
       - name: Build
         run: go build ./...
 
       - name: Vet
         run: go vet ./...
 
-      - name: Test
-        # 嵌入式 PG 端到端测试依赖网络下载二进制，失败不阻塞 CI 主流程
-        run: go test ./... -timeout 20m
+      - name: Test (unit)
+        # 除 pgcompat（嵌入式 PG e2e）外的所有包必须通过
+        run: go test $(go list ./... | grep -v adapter/pgcompat) -timeout 10m
+
+      - name: Test (embedded PG e2e, non-blocking)
+        # 嵌入式 PG 端到端测试依赖网络下载二进制，偶发失败不阻塞 CI 主流程
+        continue-on-error: true
+        run: go test ./internal/adapter/pgcompat/ -timeout 20m

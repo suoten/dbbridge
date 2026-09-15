@@ -136,19 +136,55 @@ func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 }
 
 // normalizePGDefault 规范化 information_schema.columns.column_default：
-// PG 会在默认值后附加 ::类型 转换（如 'pending'::character varying、NULL::text、'0'::numeric），
-// 原样迁移到 MySQL 等库会语法错误；这里仅剥离字符串/字面量尾部的 ::类型 后缀。
+// PG 会在默认值后附加 ::类型 转换（如 'pending'::character varying、NULL::text、'0'::numeric、
+// nextval('t_id_seq'::regclass)），原样迁移到 MySQL 等库会语法错误。
+// 注意：字面量本身也可能含 ::（如 'a::b'::text），所以从最后一个 :: 剥离，
+// 且只有剥离后是完整的引号字面量/NULL/函数调用才接受，否则保守保留原值。
 func normalizePGDefault(def string) string {
 	v := strings.TrimSpace(def)
-	i := strings.Index(v, "::")
+	// 找位于顶层（括号深度 0 且不在字符串字面量内）的最后一个 "::<类型>"。
+	// 不能简单 LastIndex：nextval('seq'::regclass) 的 :: 在括号内，
+	// 剥掉会把函数调用切碎，只能整体保留（该列会同时被标记为 AutoIncrement，
+	// DEFAULT 不会出现在生成的 DDL 中，所以保留是安全的）。
+	i := -1
+	depth := 0
+	inStr := false
+	for j := 0; j < len(v)-1; j++ {
+		c := v[j]
+		if inStr {
+			if c == '\'' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inStr = true
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ':':
+			if v[j+1] == ':' && depth == 0 {
+				i = j
+			}
+		}
+	}
 	if i < 0 {
 		return v
 	}
 	left := strings.TrimSpace(v[:i])
-	if strings.HasPrefix(left, "'") || strings.EqualFold(left, "NULL") || pgNumericPattern.MatchString(left) {
+	if strings.HasPrefix(left, "'") && strings.HasSuffix(left, "'") {
 		return left
 	}
-	// 函数式默认值（如 now()::timestamp）保留原样
+	if strings.EqualFold(left, "NULL") || pgNumericPattern.MatchString(left) {
+		return left
+	}
+	// 函数式默认值（如 now()::timestamp）剥掉尾部 cast 保留函数调用
+	if strings.HasSuffix(left, ")") && strings.Contains(left, "(") {
+		return left
+	}
+	// :: 语义不明（非常规形态），保守保留原值
 	return v
 }
 
@@ -279,6 +315,58 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		}
 	}
 
+	// 获取外键（此前 PG 源库外键被完全丢弃，MySQL→PG 有延后添加而 PG 源无数据可延后）
+	fkRows, err := a.db.QueryContext(ctx, `
+		SELECT tc.constraint_name,
+		       kcu.column_name,
+		       ccu.table_name,
+		       ccu.column_name,
+		       COALESCE(rc.delete_rule, ''),
+		       COALESCE(rc.update_rule, '')
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		JOIN information_schema.constraint_column_usage ccu
+			ON ccu.constraint_name = tc.constraint_name
+			AND ccu.table_schema = tc.table_schema
+		LEFT JOIN information_schema.referential_constraints rc
+			ON rc.constraint_name = tc.constraint_name
+			AND rc.constraint_schema = tc.table_schema
+		WHERE tc.table_schema = 'public'
+		AND tc.table_name = $1
+		AND tc.constraint_type = 'FOREIGN KEY'
+		ORDER BY tc.constraint_name, kcu.ordinal_position
+	`, tableName)
+	if err != nil {
+		return schema, fmt.Errorf("%s: 查询外键信息失败: %w", a.brand(), err)
+	}
+	fkIndex := map[string]*types.ForeignKeyMeta{}
+	var fkOrder []string
+	for fkRows.Next() {
+		var cname, colName, refTable, refCol, onDel, onUpd string
+		if err := fkRows.Scan(&cname, &colName, &refTable, &refCol, &onDel, &onUpd); err != nil {
+			fkRows.Close()
+			return schema, fmt.Errorf("%s: 读取外键信息失败: %w", a.brand(), err)
+		}
+		fk, ok := fkIndex[cname]
+		if !ok {
+			fk = &types.ForeignKeyMeta{Name: cname, RefTable: refTable, OnDelete: onDel, OnUpdate: onUpd}
+			fkIndex[cname] = fk
+			fkOrder = append(fkOrder, cname)
+		}
+		fk.Columns = append(fk.Columns, colName)
+		fk.RefColumns = append(fk.RefColumns, refCol)
+	}
+	if err := fkRows.Err(); err != nil {
+		fkRows.Close()
+		return schema, fmt.Errorf("%s: 遍历外键信息失败: %w", a.brand(), err)
+	}
+	fkRows.Close()
+	for _, name := range fkOrder {
+		schema.ForeignKeys = append(schema.ForeignKeys, *fkIndex[name])
+	}
+
 	// 获取索引
 	idxRows, err := a.db.QueryContext(ctx, `
 		SELECT i.relname as index_name,
@@ -359,9 +447,11 @@ func (a *Base) BackupTable(ctx context.Context, tableName string) (string, error
 func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s" CASCADE`, escapeIdent(originalName)))
+		// 不用 CASCADE：级联会静默删除依赖视图/外键，把“恢复备份”变成数据破坏。
+		// 有依赖时 DROP 报错，用户可显式处理依赖后再恢复。
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, escapeIdent(originalName)))
 		if err != nil {
-			return fmt.Errorf("%s: 恢复备份时删除当前表失败: %w", a.brand(), err)
+			return fmt.Errorf("%s: 恢复备份时删除当前表失败（可能存在依赖视图/外键，请先处理依赖）: %w", a.brand(), err)
 		}
 	}
 	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" RENAME TO "%s"`,
@@ -612,18 +702,21 @@ func schemaColumnNames(schema types.TableSchema) []string {
 // GetTriggers 获取 PostgreSQL 触发器定义
 func (a *Base) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT t.tgname, 
-		       CASE WHEN (t.tgtype & 4) != 0 THEN 'INSERT'
-		            WHEN (t.tgtype & 16) != 0 THEN 'DELETE'
-		            WHEN (t.tgtype & 8) != 0 THEN 'UPDATE'
-		            END as event,
-		       CASE WHEN (t.tgtype & 1) != 0 THEN 'BEFORE'
-		            WHEN (t.tgtype & 2) != 0 THEN 'AFTER'
-		            WHEN (t.tgtype & 64) != 0 THEN 'INSTEAD OF'
-		            END as timing,
-		       c.relname as table_name,
-		       pg_get_triggerdef(t.oid) as body,
-		       (t.tgtype & 16) != 0 as for_each_row
+		SELECT t.tgname,
+		       -- pg_trigger.tgtype 位定义（pg_trigger.h）：ROW=1, BEFORE=2, AFTER=4,
+		       -- INSERT=8, DELETE=16, UPDATE=32, TRUNCATE=64, INSTEAD=128。
+		       -- 旧实现位值全部错位，导致 INSERT 触发器被标成 UPDATE、BEFORE 被标成 AFTER。
+		       COALESCE(NULLIF(BTRIM(
+		           CASE WHEN (t.tgtype & 8) != 0 THEN 'INSERT ' ELSE '' END ||
+		           CASE WHEN (t.tgtype & 16) != 0 THEN 'DELETE ' ELSE '' END ||
+		           CASE WHEN (t.tgtype & 32) != 0 THEN 'UPDATE ' ELSE '' END ||
+		           CASE WHEN (t.tgtype & 64) != 0 THEN 'TRUNCATE' ELSE '' END), ''), 'INSERT') AS event,
+		       CASE WHEN (t.tgtype & 128) != 0 THEN 'INSTEAD OF'
+		            WHEN (t.tgtype & 2) != 0 THEN 'BEFORE'
+		            ELSE 'AFTER' END AS timing,
+		       c.relname AS table_name,
+		       pg_get_triggerdef(t.oid) AS body,
+		       (t.tgtype & 1) != 0 AS for_each_row
 		FROM pg_trigger t
 		JOIN pg_class c ON c.oid = t.tgrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -651,6 +744,9 @@ func (a *Base) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) {
 			Body:       body,
 			ForEachRow: forEachRow,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历触发器失败: %w", a.brand(), err)
 	}
 	return triggers, nil
 }
@@ -689,41 +785,88 @@ func (a *Base) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
 		}
 		routines = append(routines, routine)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历存储过程失败: %w", a.brand(), err)
+	}
 	return routines, nil
 }
 
 // GenerateTriggerDDL 将触发器转换为目标方言的 DDL
 func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
-			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
-		// PG 触发器体一般是 EXECUTE FUNCTION ... 转到 MySQL 需提取逻辑
-		sb.WriteString(trigger.Body)
-		return sb.String(), nil
 	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
-		return trigger.Body, nil // PG 原样输出
+		return trigger.Body, nil // PG 系内原样输出
 	default:
-		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
+		// trigger.Body 是 pg_get_triggerdef 生成的完整 CREATE TRIGGER 语句，
+		// 指向 PG 函数且函数体是 PL/pgSQL。旧实现直接在其前面拼接 MySQL 头部，
+		// 产出必然语法错误的垃圾 SQL 还可能部分执行。跨方言触发器语义转换复杂，
+		// 显式报错让用户手动迁移，绝不写入非法 SQL 污染目标库。
+		return "", fmt.Errorf("%s: 暂不支持将触发器自动转换为 %s 方言（触发器体为 PL/pgSQL），请在目标库手动创建",
+			a.brand(), targetDialect)
 	}
 }
 
 // GenerateRoutineDDL 将存储过程/函数转换为目标方言的 DDL
 func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
-		if routine.Type == "function" {
-			return fmt.Sprintf("CREATE FUNCTION `%s`() RETURNS %s\nBEGIN\n%s\nEND",
-				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
-		}
-		return fmt.Sprintf("CREATE PROCEDURE `%s`()\nBEGIN\n%s\nEND",
-			escapeIdent(routine.Name), routine.Body), nil
 	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
-		return routine.Body, nil // PG 原样输出
+		return routine.Body, nil // PG 系内原样输出
 	default:
-		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
+		// routine.Body 是 pg_get_functiondef 生成的完整 CREATE FUNCTION 语句，
+		// 旧实现包装成 MySQL 的 CREATE FUNCTION/PROCEDURE 会产出垃圾 SQL。显式报错。
+		return "", fmt.Errorf("%s: 暂不支持将存储过程/函数自动转换为 %s 方言（函数体为 PL/pgSQL），请在目标库手动创建",
+			a.brand(), targetDialect)
 	}
+}
+
+// GenerateAddForeignKeyDDL 生成 "ALTER TABLE ... ADD CONSTRAINT ..."（外键延后添加用）
+func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMeta) (string, error) {
+	fkName := fk.Name
+	if fkName == "" {
+		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`ALTER TABLE "%s" ADD CONSTRAINT "%s" FOREIGN KEY (`,
+		escapeIdent(tableName), escapeIdent(fkName)))
+	for i, c := range fk.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf(`"%s"`, escapeIdent(c)))
+	}
+	sb.WriteString(fmt.Sprintf(`) REFERENCES "%s" (`, escapeIdent(fk.RefTable)))
+	for i, c := range fk.RefColumns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf(`"%s"`, escapeIdent(c)))
+	}
+	sb.WriteString(")")
+	if fk.OnDelete != "" && !strings.EqualFold(fk.OnDelete, "NO ACTION") {
+		sb.WriteString(" ON DELETE " + strings.ToUpper(fk.OnDelete))
+	}
+	if fk.OnUpdate != "" && !strings.EqualFold(fk.OnUpdate, "NO ACTION") {
+		sb.WriteString(" ON UPDATE " + strings.ToUpper(fk.OnUpdate))
+	}
+	return sb.String(), nil
+}
+
+// FixAutoIncrementSequences 修复自增序列：显式插入 SERIAL/IDENTITY 列的值后，
+// 序列不会自动推进，不 setval 的话目标库下一条自动 INSERT 会主键冲突。
+func (a *Base) FixAutoIncrementSequences(ctx context.Context, tableName string, columns []types.ColumnMeta) error {
+	for _, col := range columns {
+		if !col.AutoIncrement {
+			continue
+		}
+		// setval(seq, MAX(id), true)：有行则序列=MAX(id)，空表则=1
+		query := fmt.Sprintf(
+			`SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE(MAX("%s"), 1), MAX("%s") IS NOT NULL) FROM "%s"`,
+			escapeSingleQuote(tableName), escapeSingleQuote(col.Name), escapeIdent(col.Name), escapeIdent(col.Name), escapeIdent(tableName))
+		if _, err := a.db.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("%s: 修复序列失败 (%s.%s): %w", a.brand(), tableName, col.Name, err)
+		}
+	}
+	return nil
 }
 
 // escapeIdent 转义 PostgreSQL 标识符

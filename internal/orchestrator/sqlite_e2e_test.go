@@ -14,8 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/adapter/sqlite"
+	types "dbbridge/pkg"
 )
 
 // TestSQLiteToSQLiteE2E SQLite→SQLite 完整迁移测试

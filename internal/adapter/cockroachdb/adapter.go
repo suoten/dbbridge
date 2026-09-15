@@ -3,8 +3,8 @@
 package cockroachdb
 
 import (
-	types "dbbridge/pkg"
 	"dbbridge/internal/adapter/pgcompat"
+	types "dbbridge/pkg"
 )
 
 func init() {

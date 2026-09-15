@@ -59,6 +59,29 @@ type DatabaseAdapter interface {
 	GenerateRoutineDDL(routine RoutineMeta, targetDialect DatabaseType) (string, error)
 }
 
+// ForeignKeyDDLGenerator 可选能力：延后添加外键约束。
+//
+// 背景多张表并发迁移时，若建表 DDL 内联外键，被引用表可能尚未创建
+// （MSSQL 报 Error 1767，MySQL 报 Error 1824），导致迁移随机失败。
+// 实现该能力的适配器会被编排器改为：先建无外键的表，数据全部迁完后
+// 再用 ALTER TABLE 逐条补建外键。
+type ForeignKeyDDLGenerator interface {
+	// GenerateAddForeignKeyDDL 生成 "ALTER TABLE tableName ADD CONSTRAINT ..." 语句
+	GenerateAddForeignKeyDDL(tableName string, fk ForeignKeyMeta) (string, error)
+}
+
+// SequenceFixer 可选能力：数据迁移后修复自增序列。
+//
+// 显式插入自增列的值不会推进序列/种子：
+//   - MSSQL：IDENTITY 种子停在初始值，后续 INSERT 报主键冲突；
+//   - PostgreSQL：SERIAL 序列停在 1，后续 INSERT 报 duplicate key。
+//
+// 实现该能力的适配器会在数据迁移完成后被编排器调用。
+type SequenceFixer interface {
+	// FixAutoIncrementSequences 将表的序列/自增种子重置到当前最大值
+	FixAutoIncrementSequences(ctx context.Context, tableName string, columns []ColumnMeta) error
+}
+
 // AdapterFactory 适配器工厂函数类型
 type AdapterFactory func() DatabaseAdapter
 

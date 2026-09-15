@@ -52,10 +52,10 @@ func TestToMySQLTextualWithDefault(t *testing.T) {
 		want string
 	}{
 		{KindText, nil, "TEXT"},
-		{KindText, strPtr(""), "TEXT"},              // 空默认值 = 无默认
-		{KindText, strPtr("NULL"), "TEXT"},          // DEFAULT NULL 在 TEXT 上合法
+		{KindText, strPtr(""), "TEXT"},     // 空默认值 = 无默认
+		{KindText, strPtr("NULL"), "TEXT"}, // DEFAULT NULL 在 TEXT 上合法
 		{KindText, strPtr("pending"), "VARCHAR(255)"},
-		{KindText, strPtr("CURRENT_TIMESTAMP"), "DATETIME"},  // 时间语义还原
+		{KindText, strPtr("CURRENT_TIMESTAMP"), "DATETIME"}, // 时间语义还原
 		{KindText, strPtr("now()"), "DATETIME"},
 		{KindBlob, nil, "BLOB"},
 		{KindBlob, strPtr("NULL"), "BLOB"},
@@ -208,10 +208,10 @@ func TestNormalizeMSSQLTypes(t *testing.T) {
 // TestToMSSQLToSizeNVarChar 验证 toSizeNVarChar 超限处理
 func TestToMSSQLToSizeNVarChar(t *testing.T) {
 	cases := []struct {
-		name   string
-		n      *int
-		def    int
-		want   string
+		name string
+		n    *int
+		def  int
+		want string
 	}{
 		{"默认值", nil, 255, "NVARCHAR(255)"},
 		{"有长度", intPtr(100), 255, "NVARCHAR(100)"},

@@ -6,9 +6,10 @@ package dameng
 
 import (
 	"context"
+	"fmt"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/adapter/mysqlcompat"
+	types "dbbridge/pkg"
 )
 
 // Adapter 达梦 DM 适配器
@@ -28,10 +29,13 @@ func (a *Adapter) GetVersion(ctx context.Context) (string, error) {
 	if err := a.DB().QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err == nil {
 		return "Dameng DM " + version, nil
 	}
-	if err := a.DB().QueryRowContext(ctx, "SELECT * FROM v$version WHERE ROWNUM = 1").Scan(&version); err == nil {
+	// 显式列出 BANNER 单列：旧实现 SELECT * 会随列数变化 Scan 失败，
+	// 导致兼容模式下永远探测不到版本
+	if err := a.DB().QueryRowContext(ctx,
+		"SELECT BANNER FROM v$version WHERE ROWNUM = 1").Scan(&version); err == nil {
 		return "Dameng DM " + version, nil
 	}
-	// 两种探测均失败时返回未知版本而非静默伪装成功，
-	// 让调用方（如 TestConnection）感知到兼容模式探测异常
-	return "Dameng DM (未知版本)", nil
+	// 两种探测均失败：连接层有问题（如无权限/非 DM 实例），返回错误而非
+	// "未知版本" 假成功，否则 TestConnection 会把坏连接当成可用连接
+	return "", fmt.Errorf("Dameng DM: 无法获取版本（VERSION() 与 v$version 探测均失败），请检查连接配置")
 }

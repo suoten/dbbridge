@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/typeconv"
+	types "dbbridge/pkg"
 
 	_ "modernc.org/sqlite"
 )
@@ -32,8 +32,10 @@ func init() {
 // SQLite 是文件型数据库，Database 字段存储文件路径
 func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) error {
 	dsn := config.Database
-	if dsn == "" || dsn == ":memory:" {
-		dsn = ":memory:"
+	if dsn == "" {
+		// 旧实现空路径静默落 :memory:，迁移“成功”但数据在进程退出后消失，
+		// 生产上等于静默丢失。这里显式报错让用户指定文件。
+		return fmt.Errorf("sqlite: 请指定 SQLite 数据库文件路径")
 	}
 	// 添加 pragma 优化；用户可能传入带参数的 DSN（如 file:x.db?mode=ro），此时用 & 追加
 	sep := "?"
@@ -73,7 +75,7 @@ func (a *Adapter) GetVersion(ctx context.Context) (string, error) {
 func (a *Adapter) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT name FROM sqlite_master
-		WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\_%' ESCAPE '\'
+		WHERE type='table' AND name NOT LIKE 'sqlite_%'
 		ORDER BY name
 	`)
 	if err != nil {
@@ -268,6 +270,59 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		})
 	}
 
+	// 外键：PRAGMA foreign_key_list 返回列 (id, seq, table, from, to, on_update, on_delete, match)，
+	// 复合外键每个成员列一行（seq 递增），按 id 分组聚合。
+	// 此前外键完全没有读取，SQLite→任意目标的外键约束会静默丢失。
+	fkRows, err := a.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", escapeIdent(tableName)))
+	if err == nil {
+		type fkAcc struct {
+			refTable           string
+			cols, refCols      []string
+			onUpdate, onDelete string
+		}
+		acc := map[int]*fkAcc{}
+		var ids []int
+		for fkRows.Next() {
+			var id, seq int
+			var refTable, from string
+			var to sql.NullString
+			var onUpdate, onDelete string
+			var match any
+			if err := fkRows.Scan(&id, &seq, &refTable, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				break
+			}
+			f, ok := acc[id]
+			if !ok {
+				f = &fkAcc{refTable: refTable, onUpdate: onUpdate, onDelete: onDelete}
+				acc[id] = f
+				ids = append(ids, id)
+			}
+			f.cols = append(f.cols, from)
+			if to.Valid && to.String != "" {
+				f.refCols = append(f.refCols, to.String)
+			} else {
+				// 未显式指定引用列 = 引用父表主键；SQLite 只支持单列 rowid 主键场景，
+				// 置空由生成端跳过（避免错误引用）
+				f.refCols = append(f.refCols, "")
+			}
+		}
+		fkRows.Close()
+		for _, id := range ids {
+			f := acc[id]
+			if len(f.cols) == 0 || f.refTable == "" {
+				continue
+			}
+			schema.ForeignKeys = append(schema.ForeignKeys, types.ForeignKeyMeta{
+				Name:       fmt.Sprintf("FK_%d", id),
+				Columns:    f.cols,
+				RefTable:   f.refTable,
+				RefColumns: f.refCols,
+				OnDelete:   f.onDelete,
+				OnUpdate:   f.onUpdate,
+			})
+		}
+	}
+
 	return schema, nil
 }
 
@@ -306,6 +361,16 @@ func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, er
 
 // RestoreFromBackup 从备份表恢复
 func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
+	// DROP 被其他表外键引用的父表时会触发 FOREIGN KEY constraint failed
+	// （DROP 对父表行做隐式参照检查）。恢复是原子的改名操作，恢复后约束依然成立，
+	// 参照检查只会误伤中间状态，参照 SQLite 官方批量操作建议临时关闭，结束再恢复。
+	if _, err := a.db.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("sqlite: 关闭外键检查失败: %w", err)
+	}
+	defer func() {
+		_, _ = a.db.ExecContext(context.Background(), "PRAGMA foreign_keys=ON")
+	}()
+
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
 		_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeIdent(originalName)))
@@ -380,6 +445,39 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			sb.WriteString(escapeIdent(c))
 		}
 		sb.WriteString(")")
+	}
+
+	// 外键内联：SQLite 不支持 ALTER TABLE ADD CONSTRAINT，
+	// 外键必须在建表时定义，否则静默丢失（此前外键完全没被迁移）
+	for _, fk := range table.ForeignKeys {
+		if len(fk.Columns) == 0 || fk.RefTable == "" || len(fk.RefColumns) == 0 {
+			continue
+		}
+		fkName := fk.Name
+		if fkName == "" {
+			fkName = fmt.Sprintf("FK_%s_%s", table.Name, fk.RefTable)
+		}
+		sb.WriteString(fmt.Sprintf(",\n  CONSTRAINT %s FOREIGN KEY (", escapeIdent(fkName)))
+		for i, c := range fk.Columns {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(escapeIdent(c))
+		}
+		sb.WriteString(") REFERENCES " + escapeIdent(fk.RefTable) + " (")
+		for i, c := range fk.RefColumns {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(escapeIdent(c))
+		}
+		sb.WriteString(")")
+		if fk.OnDelete != "" && !strings.EqualFold(fk.OnDelete, "NO ACTION") {
+			sb.WriteString(" ON DELETE " + strings.ToUpper(fk.OnDelete))
+		}
+		if fk.OnUpdate != "" && !strings.EqualFold(fk.OnUpdate, "NO ACTION") {
+			sb.WriteString(" ON UPDATE " + strings.ToUpper(fk.OnUpdate))
+		}
 	}
 
 	sb.WriteString("\n)")
@@ -478,9 +576,10 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
-				// time.Time 直写会以 Go 字符串形式落入 TEXT 列，统一转为标准 datetime 格式
+				// time.Time 直写会以 Go 字符串形式落入 TEXT 列，统一转为标准 datetime 格式；
+				// .999 在毫秒为零时省略小数部分，非零时保留毫秒，避免精度静默丢失
 				if t, isTime := val.(time.Time); isTime {
-					val = t.Format("2006-01-02 15:04:05")
+					val = t.Format("2006-01-02 15:04:05.999")
 				}
 				values[i] = val
 			} else {
@@ -576,6 +675,9 @@ func (a *Adapter) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) 
 		}
 		triggers = append(triggers, trigger)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sqlite: 遍历触发器失败: %w", err)
+	}
 	return triggers, nil
 }
 
@@ -587,16 +689,14 @@ func (a *Adapter) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) 
 // GenerateTriggerDDL 将触发器转换为目标方言的 DDL
 func (a *Adapter) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
-			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
-		sb.WriteString(trigger.Body)
-		return sb.String(), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
-		return trigger.Body, nil
 	case types.SQLite:
-		return trigger.Body, nil // SQLite 原样输出
+		return trigger.Body, nil // SQLite 原样输出（Body 本身是完整 CREATE TRIGGER 语句）
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.MySQL,
+		types.MariaDB, types.TiDB, types.OceanBase:
+		// trigger.Body 是 SQLite 的完整 CREATE TRIGGER 语句（含 FOR EACH ROW EXECUTE 语义差异、
+		// RAISE() 等专有语法）。旧实现在 MySQL 目标上前面拼接 MySQL 头部、在 PG 目标上原样执行，
+		// 两者都会产出语法错误或错误语义的 SQL。跨方言触发器转换复杂，显式报错。
+		return "", fmt.Errorf("sqlite: 暂不支持将触发器自动转换为 %s 方言，请手动迁移（触发器 %s）", targetDialect, trigger.Name)
 	default:
 		return "", fmt.Errorf("sqlite: 不支持的目标方言 %s", targetDialect)
 	}

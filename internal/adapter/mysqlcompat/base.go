@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	types "dbbridge/pkg"
 	"dbbridge/internal/typeconv"
+	types "dbbridge/pkg"
 
 	"github.com/go-sql-driver/mysql"
 	_ "github.com/go-sql-driver/mysql"
@@ -21,7 +21,7 @@ import (
 // Base MySQL 兼容协议适配器基座。
 // 实例除连接外无状态，可安全并发使用。
 type Base struct {
-	Brand string    // 品牌名，用于错误信息与版本展示
+	Brand string // 品牌名，用于错误信息与版本展示
 	db    *sql.DB
 }
 
@@ -42,6 +42,8 @@ func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error
 	cfg.Addr = fmt.Sprintf("%s:%d", config.Host, config.Port)
 	cfg.DBName = config.Database
 	cfg.ParseTime = true
+	// 触发器/存储过程体可能包含多条语句，ExecContext 整体下发需要 multiStatements
+	cfg.MultiStatements = true
 	if config.Charset != "" {
 		cfg.Params = map[string]string{"charset": config.Charset}
 	} else {
@@ -53,6 +55,11 @@ func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error
 		return fmt.Errorf("%s: 打开数据库失败: %w", a.brand(), err)
 	}
 	db.SetMaxOpenConns(10)
+	// sql.Open 不实际建连，用 Ping 立刻暴露连接参数/网络错误
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return fmt.Errorf("%s: 连接失败: %w", a.brand(), err)
+	}
 	a.db = db
 	return nil
 }
@@ -380,6 +387,20 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		}
 	}
 
+	// 大文本/二进制列（TEXT/BLOB 家族）：保持列类型不变，索引用前缀索引 col(191)，
+	// 不能把列本身降级成 VARCHAR(191)——那会截断超长数据导致迁移失败甚至数据丢失。
+	// JSON 列无法加任何索引（含前缀），只能降级 VARCHAR（超长会在写入时报错，不会静默截断）。
+	longTextCols := map[string]bool{}
+	jsonCols := map[string]bool{}
+	for _, col := range table.Columns {
+		switch typeconv.Normalize(col.BaseType) {
+		case typeconv.KindText, typeconv.KindBlob:
+			longTextCols[col.Name] = true
+		case typeconv.KindJSON:
+			jsonCols[col.Name] = true
+		}
+	}
+
 	for i, col := range table.Columns {
 		if i > 0 {
 			sb.WriteString(",\n")
@@ -387,10 +408,10 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		sb.WriteString("  ")
 		sb.WriteString(fmt.Sprintf("`%s` ", escapeIdent(col.Name)))
 		colType := a.MapType(col)
-		// 键列上的 TEXT/BLOB/JSON 降级为 VARCHAR(191)（utf8mb4 下 764 字节，兼容所有 InnoDB 行格式）
-		if indexedCols[col.Name] {
+		// 仅 JSON 列（无法加索引）降级为 VARCHAR(191)；TEXT/BLOB 用前缀索引解决
+		if indexedCols[col.Name] && jsonCols[col.Name] {
 			switch colType {
-			case "TEXT", "BLOB", "JSON", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT":
+			case "JSON", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "TEXT", "BLOB":
 				colType = "VARCHAR(191)"
 			}
 		}
@@ -441,7 +462,7 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		sb.WriteString(")")
 	}
 
-	// 唯一索引和普通索引
+	// 唯一索引和普通索引（大文本/二进制列自动加 191 前缀，utf8mb4 下 764 字节，兼容所有 InnoDB 行格式）
 	for _, idx := range table.Indexes {
 		if idx.IsPrimary {
 			continue
@@ -456,7 +477,11 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf("`%s`", escapeIdent(c)))
+			if longTextCols[c] {
+				sb.WriteString(fmt.Sprintf("`%s`(191)", escapeIdent(c)))
+			} else {
+				sb.WriteString(fmt.Sprintf("`%s`", escapeIdent(c)))
+			}
 		}
 		sb.WriteString(")")
 	}
@@ -689,21 +714,17 @@ func (a *Base) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
 // GenerateTriggerDDL 将触发器转换为目标方言的 DDL
 func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.Dameng:
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
 			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
 		sb.WriteString(trigger.Body)
 		return sb.String(), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("CREATE TRIGGER \"%s\" %s %s ON \"%s\" FOR EACH ROW\n",
-			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
-		sb.WriteString("EXECUTE FUNCTION \"" + escapeIdent(trigger.Name) + "_fn\"()\n")
-		sb.WriteString(fmt.Sprintf(";\nCREATE FUNCTION \"%s_fn\"() RETURNS TRIGGER AS $$\nBEGIN\n", escapeIdent(trigger.Name)))
-		sb.WriteString(trigger.Body)
-		sb.WriteString("\nRETURN NEW;\nEND;\n$$ LANGUAGE plpgsql;")
-		return sb.String(), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.SQLite:
+		// PL/pgSQL 与 MySQL 触发器体语法差异大（变量引用、异常处理、 EXECUTE FUNCTION 机制），
+		// SQLite 方言也不兼容（DELIMITER、DEFINER、变量声明均不同），
+		// 拼接产物必然非法且会造成“已迁移”假象，明确拒绝比静默产出坏 SQL 更安全
+		return "", fmt.Errorf("%s: 暂不支持将触发器自动转换为 %s 方言，请手动迁移（触发器 %s）", a.brand(), targetDialect, trigger.Name)
 	default:
 		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
 	}
@@ -712,23 +733,52 @@ func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types
 // GenerateRoutineDDL 将存储过程/函数转换为目标方言的 DDL
 func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.Dameng:
 		if routine.Type == "function" {
 			return fmt.Sprintf("CREATE FUNCTION `%s`() RETURNS %s\nBEGIN\n%s\nEND",
 				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
 		}
 		return fmt.Sprintf("CREATE PROCEDURE `%s`()\nBEGIN\n%s\nEND",
 			escapeIdent(routine.Name), routine.Body), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
-		if routine.Type == "function" {
-			return fmt.Sprintf("CREATE FUNCTION \"%s\"() RETURNS %s AS $$\nBEGIN\n%s\nEND;\n$$ LANGUAGE plpgsql;",
-				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
-		}
-		return fmt.Sprintf("CREATE PROCEDURE \"%s\"() AS $$\nBEGIN\n%s\nEND;\n$$ LANGUAGE plpgsql;",
-			escapeIdent(routine.Name), routine.Body), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.SQLite:
+		// 同触发器：语法转换非拼接可实现，明确拒绝
+		return "", fmt.Errorf("%s: 暂不支持将存储过程/函数自动转换为 %s 方言，请手动迁移（%s）", a.brand(), targetDialect, routine.Name)
 	default:
 		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
 	}
+}
+
+// GenerateAddForeignKeyDDL 生成 "ALTER TABLE ... ADD CONSTRAINT ..."（外键延后添加用）。
+// 之前 MySQL 目标库直接丢弃源库外键（保真度丢失）；启用延后添加后外键得以完整迁移。
+func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMeta) (string, error) {
+	fkName := fk.Name
+	if fkName == "" {
+		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("ALTER TABLE `%s` ADD CONSTRAINT `%s` FOREIGN KEY (",
+		escapeIdent(tableName), escapeIdent(fkName)))
+	for i, c := range fk.Columns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("`%s`", escapeIdent(c)))
+	}
+	sb.WriteString(fmt.Sprintf(") REFERENCES `%s` (", escapeIdent(fk.RefTable)))
+	for i, c := range fk.RefColumns {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("`%s`", escapeIdent(c)))
+	}
+	sb.WriteString(")")
+	if fk.OnDelete != "" && !strings.EqualFold(fk.OnDelete, "no_action") {
+		sb.WriteString(" ON DELETE " + strings.ToUpper(fk.OnDelete))
+	}
+	if fk.OnUpdate != "" && !strings.EqualFold(fk.OnUpdate, "no_action") {
+		sb.WriteString(" ON UPDATE " + strings.ToUpper(fk.OnUpdate))
+	}
+	return sb.String(), nil
 }
 
 // escapeIdent 转义 MySQL 标识符，防止 SQL 注入

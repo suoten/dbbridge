@@ -13,11 +13,11 @@ import (
 // SQLFileParser SQL 文件流式解析器
 // 支持 GB 级 SQL 文件的流式读取，逐条解析 SQL 语句
 type SQLFileParser struct {
-	filePath  string
-	dialect   types.DatabaseType // 源方言，如 MySQL
-	reader    *bufio.Reader
-	file      *os.File
-	lineNum   int
+	filePath string
+	dialect  types.DatabaseType // 源方言，如 MySQL
+	reader   *bufio.Reader
+	file     *os.File
+	lineNum  int
 }
 
 // NewSQLFileParser 创建 SQL 文件解析器
@@ -133,19 +133,19 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 			ch := line[i]
 
 			switch ch {
-		case '\'':
-			if !inDoubleQuote && !inBacktick {
-				// 处理转义的单引号（MySQL 用 \ 或 ''）
-				if i > 0 && line[i-1] == '\\' {
-					continue
+			case '\'':
+				if !inDoubleQuote && !inBacktick {
+					// 处理转义的单引号（MySQL 用 \ 或 ''）
+					if i > 0 && line[i-1] == '\\' {
+						continue
+					}
+					// 字符串内的 '' 是转义引号，跳过后保持字符串状态
+					if inSingleQuote && i+1 < len(line) && line[i+1] == '\'' {
+						i++
+						continue
+					}
+					inSingleQuote = !inSingleQuote
 				}
-				// 字符串内的 '' 是转义引号，跳过后保持字符串状态
-				if inSingleQuote && i+1 < len(line) && line[i+1] == '\'' {
-					i++
-					continue
-				}
-				inSingleQuote = !inSingleQuote
-			}
 			case '"':
 				if !inSingleQuote && !inBacktick {
 					inDoubleQuote = !inDoubleQuote
