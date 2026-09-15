@@ -14,6 +14,7 @@ const (
 	Dameng      DatabaseType = "dameng"
 	KingbaseES  DatabaseType = "kingbase"
 	CockroachDB DatabaseType = "cockroachdb"
+	MSSQL       DatabaseType = "mssql"
 )
 
 // ConnectionConfig 数据库连接配置
@@ -26,6 +27,7 @@ type ConnectionConfig struct {
 	Database string       `json:"database"`
 	SSLMode  string       `json:"sslMode,omitempty"` // PostgreSQL 专用
 	Charset  string       `json:"charset,omitempty"` // MySQL 专用
+	Instance string       `json:"instance,omitempty"` // MSSQL 实例名（可选）
 }
 
 // TableMeta 表的元数据
@@ -79,6 +81,42 @@ type TableSchema struct {
 	Engine       string          `json:"engine,omitempty"`       // MySQL 专用
 	Charset      string          `json:"charset,omitempty"`      // MySQL 专用
 	Collation    string          `json:"collation,omitempty"`    // MySQL 专用
+	Checks       []CheckMeta     `json:"checks,omitempty"`       // CHECK 约束
+	Triggers     []TriggerMeta   `json:"triggers,omitempty"`     // 触发器
+}
+
+// CheckMeta CHECK 约束元数据
+type CheckMeta struct {
+	Name       string `json:"name"`
+	Definition string `json:"definition"` // 约束表达式，如 (age > 0)
+}
+
+// TriggerMeta 触发器元数据
+type TriggerMeta struct {
+	Name        string `json:"name"`
+	Event       string `json:"event"`        // INSERT, UPDATE, DELETE
+	Timing      string `json:"timing"`       // BEFORE, AFTER, INSTEAD OF
+	Table       string `json:"table"`        // 关联的表
+	Body        string `json:"body"`         // 触发器主体代码（源方言）
+	ForEachRow  bool   `json:"forEachRow"`   // 是否行级触发
+	Columns     []string `json:"columns,omitempty"` // UPDATE 触发器的列列表
+}
+
+// RoutineMeta 存储过程/函数元数据
+type RoutineMeta struct {
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`       // "procedure" 或 "function"
+	Body       string   `json:"body"`       // 主体代码（源方言）
+	Parameters []RoutineParam `json:"parameters,omitempty"`
+	Returns    string   `json:"returns,omitempty"` // 函数返回类型
+	Language   string   `json:"language,omitempty"`
+}
+
+// RoutineParam 存储过程/函数参数
+type RoutineParam struct {
+	Name     string `json:"name"`
+	DataType string `json:"dataType"`
+	Mode     string `json:"mode"` // IN, OUT, INOUT
 }
 
 // Row 一行数据，使用 map 表示列名到值的映射
@@ -99,6 +137,8 @@ type MigrationConfig struct {
 	DropIfExists    bool             `json:"dropIfExists"`             // 目标表存在时是否先删除
 	BackupBefore    bool             `json:"backupBefore"`             // 迁移前备份目标库同名表
 	AutoRollback    bool             `json:"autoRollback"`             // 迁移失败时自动回滚到备份
+	MigrateTriggers bool             `json:"migrateTriggers"`          // 迁移触发器
+	MigrateRoutines bool             `json:"migrateRoutines"`          // 迁移存储过程/函数
 }
 
 // ProgressInfo 迁移进度信息
@@ -137,6 +177,10 @@ type MigrationReport struct {
 	Backups        []BackupInfo      `json:"backups,omitempty"`     // 备份记录
 	RollbackCount  int               `json:"rollbackCount,omitempty"` // 回滚的表数
 	Error          string            `json:"error,omitempty"`        // 迁移失败原因（含取消）
+	TriggersMigrated  int           `json:"triggersMigrated,omitempty"`  // 迁移的触发器数
+	RoutinesMigrated  int           `json:"routinesMigrated,omitempty"`  // 迁移的存储过程/函数数
+	TriggerErrors     []string      `json:"triggerErrors,omitempty"`     // 触发器迁移失败列表
+	RoutineErrors     []string      `json:"routineErrors,omitempty"`     // 存储过程迁移失败列表
 }
 
 // TableReport 单表迁移报告

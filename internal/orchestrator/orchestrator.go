@@ -312,6 +312,16 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		return report, fmt.Errorf("迁移已取消")
 	}
 
+	// 5. 迁移触发器
+	if o.config.MigrateTriggers && o.sourceAdapter != nil {
+		o.migrateTriggers(runCtx, report)
+	}
+
+	// 6. 迁移存储过程/函数
+	if o.config.MigrateRoutines && o.sourceAdapter != nil {
+		o.migrateRoutines(runCtx, report)
+	}
+
 	// done 事件必须携带真实累计行数（report.TotalRows 已在上方汇总），否则前端进度条归零
 	o.reportProgress(ctx, "done", "", report.TotalRows, report.TotalRows)
 	o.log("INFO", "", fmt.Sprintf("迁移完成！成功: %d, 失败: %d, 耗时: %s",
@@ -606,4 +616,110 @@ func truncate(s string, n int) string {
 		used += size
 	}
 	return sb.String() + "..."
+}
+
+// migrateTriggers 迁移触发器：从源库读取触发器定义，转换为目标方言，在目标库执行。
+func (o *Orchestrator) migrateTriggers(ctx context.Context, report *types.MigrationReport) {
+	o.log("INFO", "", "开始迁移触发器...")
+
+	triggers, err := o.sourceAdapter.GetTriggers(ctx)
+	if err != nil {
+		o.log("WARN", "", fmt.Sprintf("读取源库触发器失败: %v", err))
+		return
+	}
+	if len(triggers) == 0 {
+		o.log("INFO", "", "源库无触发器")
+		return
+	}
+
+	o.log("INFO", "", fmt.Sprintf("发现 %d 个触发器，开始转换并执行...", len(triggers)))
+
+	targetDialect := o.config.Target.Type
+	for _, trigger := range triggers {
+		if ctx.Err() != nil {
+			return
+		}
+
+		ddl, err := o.sourceAdapter.GenerateTriggerDDL(trigger, targetDialect)
+		if err != nil {
+			msg := fmt.Sprintf("触发器 %s: 转换失败 - %v", trigger.Name, err)
+			o.log("ERROR", trigger.Table, msg)
+			report.TriggerErrors = append(report.TriggerErrors, msg)
+			continue
+		}
+
+		// 分割多条 SQL 语句（PG 触发器需要先建函数再建触发器）
+		for _, stmt := range splitSQL(ddl) {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
+				msg := fmt.Sprintf("触发器 %s: 执行失败 - %v (SQL: %s)", trigger.Name, err, truncate(stmt, 120))
+				o.log("ERROR", trigger.Table, msg)
+				report.TriggerErrors = append(report.TriggerErrors, msg)
+				goto nextTrigger
+			}
+		}
+
+		report.TriggersMigrated++
+		o.log("INFO", trigger.Table, fmt.Sprintf("触发器 %s 迁移成功", trigger.Name))
+
+	nextTrigger:
+	}
+
+	o.log("INFO", "", fmt.Sprintf("触发器迁移完成: 成功 %d, 失败 %d", report.TriggersMigrated, len(report.TriggerErrors)))
+}
+
+// migrateRoutines 迁移存储过程/函数：从源库读取定义，转换为目标方言，在目标库执行。
+func (o *Orchestrator) migrateRoutines(ctx context.Context, report *types.MigrationReport) {
+	o.log("INFO", "", "开始迁移存储过程/函数...")
+
+	routines, err := o.sourceAdapter.GetRoutines(ctx)
+	if err != nil {
+		o.log("WARN", "", fmt.Sprintf("读取源库存储过程失败: %v", err))
+		return
+	}
+	if len(routines) == 0 {
+		o.log("INFO", "", "源库无存储过程/函数")
+		return
+	}
+
+	o.log("INFO", "", fmt.Sprintf("发现 %d 个存储过程/函数，开始转换并执行...", len(routines)))
+
+	targetDialect := o.config.Target.Type
+	for _, routine := range routines {
+		if ctx.Err() != nil {
+			return
+		}
+
+		ddl, err := o.sourceAdapter.GenerateRoutineDDL(routine, targetDialect)
+		if err != nil {
+			msg := fmt.Sprintf("存储过程 %s: 转换失败 - %v", routine.Name, err)
+			o.log("ERROR", "", msg)
+			report.RoutineErrors = append(report.RoutineErrors, msg)
+			continue
+		}
+
+		// 分割多条 SQL 语句
+		for _, stmt := range splitSQL(ddl) {
+			stmt = strings.TrimSpace(stmt)
+			if stmt == "" {
+				continue
+			}
+			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
+				msg := fmt.Sprintf("存储过程 %s: 执行失败 - %v (SQL: %s)", routine.Name, err, truncate(stmt, 120))
+				o.log("ERROR", "", msg)
+				report.RoutineErrors = append(report.RoutineErrors, msg)
+				goto nextRoutine
+			}
+		}
+
+		report.RoutinesMigrated++
+		o.log("INFO", "", fmt.Sprintf("存储过程 %s 迁移成功", routine.Name))
+
+	nextRoutine:
+	}
+
+	o.log("INFO", "", fmt.Sprintf("存储过程迁移完成: 成功 %d, 失败 %d", report.RoutinesMigrated, len(report.RoutineErrors)))
 }

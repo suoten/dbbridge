@@ -110,3 +110,123 @@ func ptrVal(p *string) string {
 	}
 	return *p
 }
+
+// TestToMSSQL 验证中立类型 → MSSQL 类型映射
+func TestToMSSQL(t *testing.T) {
+	p10 := 10
+	s2 := 2
+	len255 := 255
+	len128 := 128
+	len5000 := 5000
+
+	cases := []struct {
+		name string
+		kind Kind
+		col  types.ColumnMeta
+		want string
+	}{
+		// 整数
+		{"TINYINT", KindTinyInt, types.ColumnMeta{}, "TINYINT"},
+		{"SMALLINT", KindSmallInt, types.ColumnMeta{}, "SMALLINT"},
+		{"INT", KindInt, types.ColumnMeta{}, "INT"},
+		{"BIGINT", KindBigInt, types.ColumnMeta{}, "BIGINT"},
+		{"YEAR→SMALLINT", KindYear, types.ColumnMeta{}, "SMALLINT"},
+		// 小数
+		{"DECIMAL(p,s)", KindDecimal, types.ColumnMeta{Precision: &p10, Scale: &s2}, "DECIMAL(10, 2)"},
+		{"DECIMAL无参数", KindDecimal, types.ColumnMeta{}, "DECIMAL(18,0)"},
+		{"FLOAT→REAL", KindFloat, types.ColumnMeta{}, "REAL"},
+		{"DOUBLE→FLOAT(53)", KindDouble, types.ColumnMeta{}, "FLOAT(53)"},
+		// 布尔/位
+		{"BOOL→BIT", KindBool, types.ColumnMeta{}, "BIT"},
+		{"BIT单列", KindBit, types.ColumnMeta{}, "BIT"},
+		{"BIT多列→BINARY", KindBit, types.ColumnMeta{Length: &len128}, "BINARY(128)"},
+		// 字符串
+		{"CHAR默认", KindChar, types.ColumnMeta{}, "NCHAR(1)"},
+		{"CHAR带长度", KindChar, types.ColumnMeta{Length: &len128}, "NCHAR(128)"},
+		{"VARCHAR默认", KindVarChar, types.ColumnMeta{}, "NVARCHAR(255)"},
+		{"VARCHAR带长度", KindVarChar, types.ColumnMeta{Length: &len128}, "NVARCHAR(128)"},
+		{"VARCHAR超4000→MAX", KindVarChar, types.ColumnMeta{Length: &len5000}, "NVARCHAR(MAX)"},
+		{"TEXT→NVARCHAR(MAX)", KindText, types.ColumnMeta{}, "NVARCHAR(MAX)"},
+		// 二进制
+		{"BLOB无长度→MAX", KindBlob, types.ColumnMeta{}, "VARBINARY(MAX)"},
+		{"BLOB有长度", KindBlob, types.ColumnMeta{Length: &len255}, "VARBINARY(255)"},
+		{"BINARY有长度", KindBinary, types.ColumnMeta{Length: &len255}, "VARBINARY(255)"},
+		// 日期时间
+		{"DATE", KindDate, types.ColumnMeta{}, "DATE"},
+		{"TIME", KindTime, types.ColumnMeta{}, "TIME"},
+		{"DATETIME→DATETIME2", KindDateTime, types.ColumnMeta{}, "DATETIME2"},
+		{"TIMESTAMP→DATETIME2", KindTimestamp, types.ColumnMeta{}, "DATETIME2"},
+		// 其他
+		{"JSON→NVARCHAR(MAX)", KindJSON, types.ColumnMeta{}, "NVARCHAR(MAX)"},
+		{"UUID→UNIQUEIDENTIFIER", KindUUID, types.ColumnMeta{}, "UNIQUEIDENTIFIER"},
+		{"ENUM→NVARCHAR(50)", KindEnum, types.ColumnMeta{}, "NVARCHAR(50)"},
+		{"SET→NVARCHAR(200)", KindSet, types.ColumnMeta{}, "NVARCHAR(200)"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ToMSSQL(c.kind, c.col)
+			if got != c.want {
+				t.Errorf("ToMSSQL(%s) = %q, want %q", c.kind, got, c.want)
+			}
+		})
+	}
+}
+
+// TestNormalizeMSSQLTypes 验证 MSSQL 特有类型名能被 Normalize 正确识别
+func TestNormalizeMSSQLTypes(t *testing.T) {
+	cases := []struct {
+		input string
+		want  Kind
+	}{
+		// MSSQL 特有类型
+		{"DATETIME2", KindDateTime},
+		{"SMALLDATETIME", KindDateTime},
+		{"NVARCHAR", KindVarChar},
+		{"NCHAR", KindChar},
+		{"NTEXT", KindText},
+		{"IMAGE", KindBlob},
+		// 通用类型（确保 MSSQL 与其他方言共用时不冲突）
+		{"INT", KindInt},
+		{"BIGINT", KindBigInt},
+		{"VARCHAR", KindVarChar},
+		{"TEXT", KindText},
+		{"DECIMAL", KindDecimal},
+		{"BIT", KindBit},
+	}
+
+	for _, c := range cases {
+		t.Run(c.input, func(t *testing.T) {
+			got := Normalize(c.input)
+			if got != c.want {
+				t.Errorf("Normalize(%q) = %q, want %q", c.input, got, c.want)
+			}
+		})
+	}
+}
+
+// TestToMSSQLToSizeNVarChar 验证 toSizeNVarChar 超限处理
+func TestToMSSQLToSizeNVarChar(t *testing.T) {
+	cases := []struct {
+		name   string
+		n      *int
+		def    int
+		want   string
+	}{
+		{"默认值", nil, 255, "NVARCHAR(255)"},
+		{"有长度", intPtr(100), 255, "NVARCHAR(100)"},
+		{"超4000用MAX", intPtr(4001), 255, "NVARCHAR(MAX)"},
+		{"正好4000", intPtr(4000), 255, "NVARCHAR(4000)"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := toSizeNVarChar("NVARCHAR", c.n, c.def)
+			if got != c.want {
+				t.Errorf("toSizeNVarChar(NVARCHAR, %v, %d) = %q, want %q", c.n, c.def, got, c.want)
+			}
+		})
+	}
+}
+
+func intPtr(i int) *int { return &i }

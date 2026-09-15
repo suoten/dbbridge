@@ -20,6 +20,8 @@ import {
   RotateCcw,
   Archive,
   History,
+  Zap,
+  Code2,
 } from '@lucide/vue'
 import ConnectionForm, { type ConnectionConfig } from './components/ConnectionForm.vue'
 import ProgressPanel from './components/ProgressPanel.vue'
@@ -72,6 +74,8 @@ const migrationConfig = ref({
   ignoreErrors: false,
   backupBefore: true,
   autoRollback: true,
+  migrateTriggers: false,
+  migrateRoutines: false,
 })
 
 const migrating = ref(false)
@@ -455,6 +459,28 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
                     <div>
                       <span class="option-label">失败自动回滚</span>
                       <span class="option-hint">迁移失败恢复备份</span>
+                    </div>
+                  </div>
+                </label>
+
+                <label class="option-item" :class="{ checked: migrationConfig.migrateTriggers }">
+                  <input type="checkbox" v-model="migrationConfig.migrateTriggers" />
+                  <div class="option-content">
+                    <Zap :size="16" class="option-icon" />
+                    <div>
+                      <span class="option-label">迁移触发器</span>
+                      <span class="option-hint">自动转换触发器语法</span>
+                    </div>
+                  </div>
+                </label>
+
+                <label class="option-item" :class="{ checked: migrationConfig.migrateRoutines }">
+                  <input type="checkbox" v-model="migrationConfig.migrateRoutines" />
+                  <div class="option-content">
+                    <Code2 :size="16" class="option-icon" />
+                    <div>
+                      <span class="option-label">迁移存储过程</span>
+                      <span class="option-hint">转换函数/过程语法</span>
                     </div>
                   </div>
                 </label>

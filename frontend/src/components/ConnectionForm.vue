@@ -24,6 +24,7 @@ export interface ConnectionConfig {
   database: string
   sslMode?: string
   charset?: string
+  instance?: string
 }
 
 const props = defineProps<{
@@ -55,9 +56,12 @@ const dbTypes = [
   { value: 'opengauss', label: 'openGauss', icon: Database, group: '国产' },
   { value: 'dameng', label: '达梦 DM', icon: Database, group: '国产' },
   { value: 'kingbase', label: '金仓 KingbaseES', icon: Database, group: '国产' },
+  // 商业数据库
+  { value: 'mssql', label: 'SQL Server', icon: Server, group: '商业' },
 ]
 
 const isSQLite = computed(() => props.modelValue.type === 'sqlite')
+const isMSSQL = computed(() => props.modelValue.type === 'mssql')
 const isPostgresLike = computed(() => ['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(props.modelValue.type))
 const isPostgres = isPostgresLike
 
@@ -84,6 +88,8 @@ function update(field: keyof ConnectionConfig, value: any) {
       newConfig.port = 2881
     } else if (value === 'dameng') {
       newConfig.port = 5236
+    } else if (value === 'mssql') {
+      newConfig.port = 1433
     } else if (['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(value)) {
       newConfig.port = 5432
     }

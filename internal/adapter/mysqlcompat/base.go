@@ -619,6 +619,118 @@ func schemaColumnNames(schema types.TableSchema) []string {
 	return cols
 }
 
+// GetTriggers 获取 MySQL 触发器定义
+func (a *Base) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING, EVENT_OBJECT_TABLE,
+		       ACTION_STATEMENT, ACTION_ORIENTATION
+		FROM information_schema.TRIGGERS
+		WHERE TRIGGER_SCHEMA = DATABASE()
+		ORDER BY TRIGGER_NAME
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询触发器失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	var triggers []types.TriggerMeta
+	for rows.Next() {
+		var name, event, timing, table, body, orientation string
+		if err := rows.Scan(&name, &event, &timing, &table, &body, &orientation); err != nil {
+			return nil, fmt.Errorf("%s: 读取触发器失败: %w", a.brand(), err)
+		}
+		triggers = append(triggers, types.TriggerMeta{
+			Name:       name,
+			Event:      event,
+			Timing:     timing,
+			Table:      table,
+			Body:       body,
+			ForEachRow: orientation == "ROW",
+		})
+	}
+	return triggers, nil
+}
+
+// GetRoutines 获取 MySQL 存储过程和函数定义
+func (a *Base) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT ROUTINE_NAME, ROUTINE_TYPE, ROUTINE_DEFINITION, DTD_IDENTIFIER
+		FROM information_schema.ROUTINES
+		WHERE ROUTINE_SCHEMA = DATABASE()
+		ORDER BY ROUTINE_NAME
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询存储过程失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	var routines []types.RoutineMeta
+	for rows.Next() {
+		var name, rType string
+		var body, returns sql.NullString
+		if err := rows.Scan(&name, &rType, &body, &returns); err != nil {
+			return nil, fmt.Errorf("%s: 读取存储过程失败: %w", a.brand(), err)
+		}
+		routine := types.RoutineMeta{
+			Name: name,
+			Type: strings.ToLower(rType),
+		}
+		if body.Valid {
+			routine.Body = body.String
+		}
+		if returns.Valid {
+			routine.Returns = returns.String
+		}
+		routines = append(routines, routine)
+	}
+	return routines, nil
+}
+
+// GenerateTriggerDDL 将触发器转换为目标方言的 DDL
+func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
+	switch targetDialect {
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
+			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
+		sb.WriteString(trigger.Body)
+		return sb.String(), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("CREATE TRIGGER \"%s\" %s %s ON \"%s\" FOR EACH ROW\n",
+			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
+		sb.WriteString("EXECUTE FUNCTION \"" + escapeIdent(trigger.Name) + "_fn\"()\n")
+		sb.WriteString(fmt.Sprintf(";\nCREATE FUNCTION \"%s_fn\"() RETURNS TRIGGER AS $$\nBEGIN\n", escapeIdent(trigger.Name)))
+		sb.WriteString(trigger.Body)
+		sb.WriteString("\nRETURN NEW;\nEND;\n$$ LANGUAGE plpgsql;")
+		return sb.String(), nil
+	default:
+		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
+	}
+}
+
+// GenerateRoutineDDL 将存储过程/函数转换为目标方言的 DDL
+func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
+	switch targetDialect {
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+		if routine.Type == "function" {
+			return fmt.Sprintf("CREATE FUNCTION `%s`() RETURNS %s\nBEGIN\n%s\nEND",
+				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
+		}
+		return fmt.Sprintf("CREATE PROCEDURE `%s`()\nBEGIN\n%s\nEND",
+			escapeIdent(routine.Name), routine.Body), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+		if routine.Type == "function" {
+			return fmt.Sprintf("CREATE FUNCTION \"%s\"() RETURNS %s AS $$\nBEGIN\n%s\nEND;\n$$ LANGUAGE plpgsql;",
+				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
+		}
+		return fmt.Sprintf("CREATE PROCEDURE \"%s\"() AS $$\nBEGIN\n%s\nEND;\n$$ LANGUAGE plpgsql;",
+			escapeIdent(routine.Name), routine.Body), nil
+	default:
+		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
+	}
+}
+
 // escapeIdent 转义 MySQL 标识符，防止 SQL 注入
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "`", "``")

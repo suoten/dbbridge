@@ -609,6 +609,123 @@ func schemaColumnNames(schema types.TableSchema) []string {
 	return cols
 }
 
+// GetTriggers 获取 PostgreSQL 触发器定义
+func (a *Base) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT t.tgname, 
+		       CASE WHEN (t.tgtype & 4) != 0 THEN 'INSERT'
+		            WHEN (t.tgtype & 16) != 0 THEN 'DELETE'
+		            WHEN (t.tgtype & 8) != 0 THEN 'UPDATE'
+		            END as event,
+		       CASE WHEN (t.tgtype & 1) != 0 THEN 'BEFORE'
+		            WHEN (t.tgtype & 2) != 0 THEN 'AFTER'
+		            WHEN (t.tgtype & 64) != 0 THEN 'INSTEAD OF'
+		            END as timing,
+		       c.relname as table_name,
+		       pg_get_triggerdef(t.oid) as body,
+		       (t.tgtype & 16) != 0 as for_each_row
+		FROM pg_trigger t
+		JOIN pg_class c ON c.oid = t.tgrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public'
+		AND NOT t.tgisinternal
+		ORDER BY t.tgname
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询触发器失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	var triggers []types.TriggerMeta
+	for rows.Next() {
+		var name, event, timing, table, body string
+		var forEachRow bool
+		if err := rows.Scan(&name, &event, &timing, &table, &body, &forEachRow); err != nil {
+			return nil, fmt.Errorf("%s: 读取触发器失败: %w", a.brand(), err)
+		}
+		triggers = append(triggers, types.TriggerMeta{
+			Name:       name,
+			Event:      event,
+			Timing:     timing,
+			Table:      table,
+			Body:       body,
+			ForEachRow: forEachRow,
+		})
+	}
+	return triggers, nil
+}
+
+// GetRoutines 获取 PostgreSQL 存储过程和函数定义
+func (a *Base) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT p.proname, 
+		       CASE WHEN p.prokind = 'p' THEN 'procedure' ELSE 'function' END as type,
+		       pg_get_functiondef(p.oid) as body,
+		       pg_get_function_result(p.oid) as returns
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'public'
+		ORDER BY p.proname
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询存储过程失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	var routines []types.RoutineMeta
+	for rows.Next() {
+		var name, rType, body string
+		var returns sql.NullString
+		if err := rows.Scan(&name, &rType, &body, &returns); err != nil {
+			return nil, fmt.Errorf("%s: 读取存储过程失败: %w", a.brand(), err)
+		}
+		routine := types.RoutineMeta{
+			Name: name,
+			Type: rType,
+			Body: body,
+		}
+		if returns.Valid {
+			routine.Returns = returns.String
+		}
+		routines = append(routines, routine)
+	}
+	return routines, nil
+}
+
+// GenerateTriggerDDL 将触发器转换为目标方言的 DDL
+func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
+	switch targetDialect {
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
+			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
+		// PG 触发器体一般是 EXECUTE FUNCTION ... 转到 MySQL 需提取逻辑
+		sb.WriteString(trigger.Body)
+		return sb.String(), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+		return trigger.Body, nil // PG 原样输出
+	default:
+		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
+	}
+}
+
+// GenerateRoutineDDL 将存储过程/函数转换为目标方言的 DDL
+func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
+	switch targetDialect {
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+		if routine.Type == "function" {
+			return fmt.Sprintf("CREATE FUNCTION `%s`() RETURNS %s\nBEGIN\n%s\nEND",
+				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
+		}
+		return fmt.Sprintf("CREATE PROCEDURE `%s`()\nBEGIN\n%s\nEND",
+			escapeIdent(routine.Name), routine.Body), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+		return routine.Body, nil // PG 原样输出
+	default:
+		return "", fmt.Errorf("%s: 不支持的目标方言 %s", a.brand(), targetDialect)
+	}
+}
+
 // escapeIdent 转义 PostgreSQL 标识符
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "\"", "\"\"")

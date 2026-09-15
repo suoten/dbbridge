@@ -10,6 +10,7 @@ import (
 	_ "dbbridge/internal/adapter/dameng"
 	_ "dbbridge/internal/adapter/kingbase"
 	_ "dbbridge/internal/adapter/mariadb"
+	_ "dbbridge/internal/adapter/mssql"
 	_ "dbbridge/internal/adapter/mysql"
 	_ "dbbridge/internal/adapter/oceanbase"
 	_ "dbbridge/internal/adapter/opengauss"
@@ -37,6 +38,7 @@ type ConnectionRequest struct {
 	Database string `json:"database"`
 	SSLMode  string `json:"sslMode"`
 	Charset  string `json:"charset"`
+	Instance string `json:"instance"` // MSSQL 实例名
 }
 
 // TestConnectionResult 测试连接结果
@@ -62,17 +64,19 @@ type GetTableSchemaResult struct {
 
 // StartMigrationRequest 开始迁移请求
 type StartMigrationRequest struct {
-	Source        ConnectionRequest  `json:"source"`
-	Target        ConnectionRequest  `json:"target"`
-	Tables        []string           `json:"tables,omitempty"`
-	StructureOnly bool               `json:"structureOnly"`
-	DataOnly      bool               `json:"dataOnly"`
-	BatchSize     int                `json:"batchSize"`
-	Concurrency   int                `json:"concurrency"`
-	DropIfExists  bool               `json:"dropIfExists"`
-	IgnoreErrors  bool               `json:"ignoreErrors"`
-	BackupBefore  bool               `json:"backupBefore"`
-	AutoRollback  bool               `json:"autoRollback"`
+	Source            ConnectionRequest `json:"source"`
+	Target            ConnectionRequest `json:"target"`
+	Tables            []string          `json:"tables,omitempty"`
+	StructureOnly     bool              `json:"structureOnly"`
+	DataOnly          bool              `json:"dataOnly"`
+	BatchSize         int               `json:"batchSize"`
+	Concurrency       int               `json:"concurrency"`
+	DropIfExists      bool              `json:"dropIfExists"`
+	IgnoreErrors      bool              `json:"ignoreErrors"`
+	BackupBefore      bool              `json:"backupBefore"`
+	AutoRollback      bool              `json:"autoRollback"`
+	MigrateTriggers   bool              `json:"migrateTriggers"`
+	MigrateRoutines   bool              `json:"migrateRoutines"`
 }
 
 // SimpleResult 通用操作结果
@@ -126,6 +130,7 @@ func toConfig(req ConnectionRequest) types.ConnectionConfig {
 		Database: req.Database,
 		SSLMode:  req.SSLMode,
 		Charset:  req.Charset,
+		Instance: req.Instance,
 	}
 }
 
@@ -179,17 +184,19 @@ func (a *App) GetSupportedDatabases() []string {
 // StartMigration 开始迁移（阻塞执行，进度通过事件推送）
 func (a *App) StartMigration(req StartMigrationRequest) *types.MigrationReport {
 	config := types.MigrationConfig{
-		Source:        toConfig(req.Source),
-		Target:        toConfig(req.Target),
-		Tables:        req.Tables,
-		StructureOnly: req.StructureOnly,
-		DataOnly:      req.DataOnly,
-		BatchSize:     req.BatchSize,
-		Concurrency:   req.Concurrency,
-		DropIfExists:  req.DropIfExists,
-		IgnoreErrors:  req.IgnoreErrors,
-		BackupBefore:  req.BackupBefore,
-		AutoRollback:  req.AutoRollback,
+		Source:            toConfig(req.Source),
+		Target:            toConfig(req.Target),
+		Tables:            req.Tables,
+		StructureOnly:     req.StructureOnly,
+		DataOnly:          req.DataOnly,
+		BatchSize:         req.BatchSize,
+		Concurrency:       req.Concurrency,
+		DropIfExists:      req.DropIfExists,
+		IgnoreErrors:      req.IgnoreErrors,
+		BackupBefore:      req.BackupBefore,
+		AutoRollback:      req.AutoRollback,
+		MigrateTriggers:   req.MigrateTriggers,
+		MigrateRoutines:   req.MigrateRoutines,
 	}
 
 	report, err := a.migrationService.Run(config,

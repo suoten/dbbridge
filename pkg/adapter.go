@@ -47,6 +47,16 @@ type DatabaseAdapter interface {
 	// 类型映射支持
 	// MapType 将源数据库的列类型映射为目标数据库的类型
 	MapType(col ColumnMeta) string
+
+	// 触发器与存储过程（可选功能，不支持时返回空切片或 nil 错误）
+	// GetTriggers 获取数据库中所有触发器定义
+	GetTriggers(ctx context.Context) ([]TriggerMeta, error)
+	// GetRoutines 获取数据库中所有存储过程和函数定义
+	GetRoutines(ctx context.Context) ([]RoutineMeta, error)
+	// GenerateTriggerDDL 将源方言的触发器转为目标方言的 DDL
+	GenerateTriggerDDL(trigger TriggerMeta, targetDialect DatabaseType) (string, error)
+	// GenerateRoutineDDL 将源方言的存储过程/函数转为目标方言的 DDL
+	GenerateRoutineDDL(routine RoutineMeta, targetDialect DatabaseType) (string, error)
 }
 
 // AdapterFactory 适配器工厂函数类型

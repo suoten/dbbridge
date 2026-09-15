@@ -12,7 +12,9 @@
   <a href="https://github.com/suoten/dbbridge/releases"><img src="https://img.shields.io/github/v/release/suoten/dbbridge" alt="GitHub Release"></a>
 </p>
 
-<h1 align="center">DBBridge</h1>
+<p align="center">
+  <img src="design/logo/wordmark.png" alt="DBBridge" width="520">
+</p>
 
 <p align="center"><strong>数据库迁移工具</strong></p>
 
@@ -66,8 +68,9 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 | **达梦 DM8** | ✅ | ✅ |
 | **人大金仓 KingbaseES** | ✅ | ✅ |
 | **CockroachDB** | ✅ | ✅ |
+| **SQL Server (MSSQL)** | ✅ | ✅ |
 
-> 以上 10 种数据库可以**任意两两互转**（N × N 组合）。
+> 以上 11 种数据库可以**任意两两互转**（N × N 组合）。
 
 ### 🛡️ 安全可靠
 - **迁移前自动备份**：目标库的同名表自动重命名为 `_bak_` 前缀
@@ -75,6 +78,15 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 - **事务保障**：每批数据写入用事务包裹，失败可回滚
 - **参数化查询**：防止 SQL 注入
 - **日志脱敏**：密码不出现在任何日志中
+
+### ⚡ 触发器与存储过程迁移
+- **触发器自动转换**：MSSQL `inserted/deleted` → MySQL `NEW/OLD`，语法自动适配目标方言
+- **存储过程自动转换**：T-SQL → MySQL/PLpgSQL 语法转换，`@变量` → 局部变量声明等
+- **CHECK 约束迁移**：表结构中的 CHECK 约束一并迁移到目标库
+- **多方言支持**：MSSQL、MySQL、PostgreSQL 之间的触发器和存储过程互转
+
+> ⚠️ 触发器和存储过程的转换是语法层面的自动转换，复杂业务逻辑可能需要人工微调。
+> 转换失败的项会在迁移报告中列出，方便定位和手动修复。
 
 ### 📊 迁移报告
 - 成功/失败表数统计

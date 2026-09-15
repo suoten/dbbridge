@@ -549,6 +549,64 @@ func schemaColumnNames(schema types.TableSchema) []string {
 	return cols
 }
 
+// GetTriggers 获取 SQLite 触发器定义
+func (a *Adapter) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT name, sql FROM sqlite_master
+		WHERE type='trigger' AND name NOT LIKE 'sqlite_%'
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: 查询触发器失败: %w", err)
+	}
+	defer rows.Close()
+
+	var triggers []types.TriggerMeta
+	for rows.Next() {
+		var name, sqlText sql.NullString
+		if err := rows.Scan(&name, &sqlText); err != nil {
+			return nil, fmt.Errorf("sqlite: 读取触发器失败: %w", err)
+		}
+		if !name.Valid || !sqlText.Valid {
+			continue
+		}
+		trigger := types.TriggerMeta{
+			Name: name.String,
+			Body: sqlText.String,
+		}
+		triggers = append(triggers, trigger)
+	}
+	return triggers, nil
+}
+
+// GetRoutines SQLite 不支持存储过程，返回空切片
+func (a *Adapter) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
+	return nil, nil
+}
+
+// GenerateTriggerDDL 将触发器转换为目标方言的 DDL
+func (a *Adapter) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
+	switch targetDialect {
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
+			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
+		sb.WriteString(trigger.Body)
+		return sb.String(), nil
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+		return trigger.Body, nil
+	case types.SQLite:
+		return trigger.Body, nil // SQLite 原样输出
+	default:
+		return "", fmt.Errorf("sqlite: 不支持的目标方言 %s", targetDialect)
+	}
+}
+
+// GenerateRoutineDDL SQLite 不支持存储过程，直接返回错误
+func (a *Adapter) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
+	return "", fmt.Errorf("sqlite: 不支持存储过程/函数迁移")
+}
+
 // escapeIdent 以 SQL 方式转义标识符（双写引号），不能用 Go 的 %q——
 // 那会对 " 产生 \" 转义，在 SQL 里是字面反斜杠
 func escapeIdent(s string) string {

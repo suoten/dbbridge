@@ -71,7 +71,7 @@ const (
 )
 
 // kindAliases 各方言基础类型名 → 中立类型
-// 覆盖 MySQL/MariaDB、PostgreSQL/openGauss/Kingbase、SQLite 的常见类型名。
+// 覆盖 MySQL/MariaDB、PostgreSQL/openGauss/Kingbase、SQLite、MSSQL 的常见类型名。
 var kindAliases = map[string]Kind{
 	// 整数
 	"TINYINT": KindTinyInt, "INT1": KindTinyInt,
@@ -90,14 +90,14 @@ var kindAliases = map[string]Kind{
 	"CHAR": KindChar, "NCHAR": KindChar, "CHARACTER": KindChar, "BPCHAR": KindChar,
 	"VARCHAR": KindVarChar, "NVARCHAR": KindVarChar, "CHARACTER VARYING": KindVarChar, "VARCHAR2": KindVarChar,
 	"TINYTEXT": KindText, "TEXT": KindText, "MEDIUMTEXT": KindText, "LONGTEXT": KindText,
-	"CLOB": KindText, "STRING": KindText,
+	"CLOB": KindText, "STRING": KindText, "NTEXT": KindText,
 	// 二进制
 	"TINYBLOB": KindBlob, "BLOB": KindBlob, "MEDIUMBLOB": KindBlob, "LONGBLOB": KindBlob, "BYTEA": KindBlob,
-	"BINARY": KindBinary, "VARBINARY": KindBinary, "RAW": KindBinary,
+	"BINARY": KindBinary, "VARBINARY": KindBinary, "RAW": KindBinary, "IMAGE": KindBlob,
 	// 日期时间
 	"DATE": KindDate,
 	"TIME": KindTime, "TIME WITHOUT TIME ZONE": KindTime,
-	"DATETIME": KindDateTime,
+	"DATETIME": KindDateTime, "DATETIME2": KindDateTime, "SMALLDATETIME": KindDateTime,
 	"TIMESTAMP": KindTimestamp, "TIMESTAMP WITHOUT TIME ZONE": KindTimestamp,
 	"TIMESTAMPTZ": KindTimestamp, "TIMESTAMP WITH TIME ZONE": KindTimestamp,
 	// 其他
@@ -320,6 +320,78 @@ func withUnsigned(base string, col types.ColumnMeta) string {
 		return base + " UNSIGNED"
 	}
 	return base
+}
+
+// ToMSSQL 中立类型 → MSSQL (SQL Server) 类型
+func ToMSSQL(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt:
+		return "TINYINT"
+	case KindSmallInt:
+		return "SMALLINT"
+	case KindInt:
+		return "INT"
+	case KindBigInt:
+		return "BIGINT"
+	case KindYear:
+		return "SMALLINT"
+	case KindDecimal:
+		if col.Precision != nil && col.Scale != nil {
+			return fmt.Sprintf("DECIMAL(%d, %d)", *col.Precision, *col.Scale)
+		}
+		return "DECIMAL(18,0)"
+	case KindFloat:
+		return "REAL"
+	case KindDouble:
+		return "FLOAT(53)"
+	case KindBool:
+		return "BIT"
+	case KindBit:
+		if col.Length != nil && *col.Length > 1 {
+			return fmt.Sprintf("BINARY(%d)", *col.Length)
+		}
+		return "BIT"
+	case KindChar:
+		return toSizeNVarChar("NCHAR", col.Length, 1)
+	case KindVarChar:
+		return toSizeNVarChar("NVARCHAR", col.Length, 255)
+	case KindText:
+		return "NVARCHAR(MAX)"
+	case KindBlob, KindBinary:
+		if col.Length != nil && *col.Length > 0 {
+			return fmt.Sprintf("VARBINARY(%d)", *col.Length)
+		}
+		return "VARBINARY(MAX)"
+	case KindDate:
+		return "DATE"
+	case KindTime:
+		return "TIME"
+	case KindDateTime:
+		return "DATETIME2"
+	case KindTimestamp:
+		return "DATETIME2"
+	case KindJSON:
+		return "NVARCHAR(MAX)"
+	case KindUUID:
+		return "UNIQUEIDENTIFIER"
+	case KindEnum:
+		return "NVARCHAR(50)"
+	case KindSet:
+		return "NVARCHAR(200)"
+	default:
+		return fallback(col, "NVARCHAR(MAX)")
+	}
+}
+
+// toSizeNVarChar 生成带参数的类型名，MSSQL NVARCHAR 默认上限 4000，超出用 MAX
+func toSizeNVarChar(name string, n *int, def int) string {
+	if n != nil && *n > 0 {
+		if *n > 4000 {
+			return name + "(MAX)"
+		}
+		return fmt.Sprintf("%s(%d)", name, *n)
+	}
+	return fmt.Sprintf("%s(%d)", name, def)
 }
 
 // fallback 未知类型时的兜底：尽量保留原始类型声明，否则退到 def。

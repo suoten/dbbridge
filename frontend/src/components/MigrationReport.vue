@@ -11,6 +11,8 @@ import {
   Archive,
   RotateCcw,
   ShieldCheck,
+  Zap,
+  Code2,
 } from '@lucide/vue'
 
 interface TableReport {
@@ -42,6 +44,10 @@ interface MigrationReport {
   tableDetails: TableReport[]
   backups?: BackupInfo[]
   rollbackCount?: number
+  triggersMigrated?: number
+  routinesMigrated?: number
+  triggerErrors?: string[]
+  routineErrors?: string[]
 }
 
 defineProps<{
@@ -158,6 +164,46 @@ function getStatus(s: string) {
               {{ t.error }}
             </span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== Trigger & Routine Migration Results ====== -->
+    <div class="details-section" v-if="report.triggersMigrated || report.routinesMigrated || (report.triggerErrors && report.triggerErrors.length > 0) || (report.routineErrors && report.routineErrors.length > 0)">
+      <div class="details-header">
+        <Zap :size="16" />
+        <span>触发器与存储过程迁移</span>
+      </div>
+
+      <div class="routine-summary">
+        <div class="routine-stat" v-if="report.triggersMigrated !== undefined">
+          <Zap :size="14" />
+          <span class="routine-stat-label">触发器成功:</span>
+          <span class="routine-stat-value success">{{ report.triggersMigrated }}</span>
+          <span class="routine-stat-fail" v-if="report.triggerErrors && report.triggerErrors.length > 0">
+            失败: {{ report.triggerErrors.length }}
+          </span>
+        </div>
+        <div class="routine-stat" v-if="report.routinesMigrated !== undefined">
+          <Code2 :size="14" />
+          <span class="routine-stat-label">存储过程成功:</span>
+          <span class="routine-stat-value success">{{ report.routinesMigrated }}</span>
+          <span class="routine-stat-fail" v-if="report.routineErrors && report.routineErrors.length > 0">
+            失败: {{ report.routineErrors.length }}
+          </span>
+        </div>
+      </div>
+
+      <div class="error-list" v-if="report.triggerErrors && report.triggerErrors.length > 0">
+        <div class="error-item" v-for="(err, i) in report.triggerErrors" :key="'trig-' + i">
+          <AlertCircle :size="12" />
+          <span>{{ err }}</span>
+        </div>
+      </div>
+      <div class="error-list" v-if="report.routineErrors && report.routineErrors.length > 0">
+        <div class="error-item" v-for="(err, i) in report.routineErrors" :key="'rout-' + i">
+          <AlertCircle :size="12" />
+          <span>{{ err }}</span>
         </div>
       </div>
     </div>
@@ -365,6 +411,54 @@ function getStatus(s: string) {
 .warning-card .summary-icon {
   background: var(--color-warning-light);
   color: var(--color-warning);
+}
+
+/* ====== Trigger & Routine Results ====== */
+.routine-summary {
+  display: flex;
+  gap: 24px;
+  padding: 12px 18px;
+}
+
+.routine-stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.routine-stat-label {
+  font-weight: 600;
+}
+
+.routine-stat-value.success {
+  color: var(--color-success);
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.routine-stat-fail {
+  color: var(--color-danger);
+  font-size: 12px;
+}
+
+.error-list {
+  padding: 0 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.error-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-danger);
+  padding: 6px 10px;
+  background: rgba(239, 68, 68, 0.04);
+  border-radius: var(--radius-sm);
 }
 
 /* ====== 响应式 ====== */
