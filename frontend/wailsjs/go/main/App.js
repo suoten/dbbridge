@@ -6,12 +6,28 @@ export function CancelMigration() {
   return window['go']['main']['App']['CancelMigration']();
 }
 
+export function CheckCompatibility(arg1) {
+  return window['go']['main']['App']['CheckCompatibility'](arg1);
+}
+
+export function ConvertSQL(arg1) {
+  return window['go']['main']['App']['ConvertSQL'](arg1);
+}
+
 export function DeleteBackup(arg1) {
   return window['go']['main']['App']['DeleteBackup'](arg1);
 }
 
 export function DeleteMigrationHistory(arg1) {
   return window['go']['main']['App']['DeleteMigrationHistory'](arg1);
+}
+
+export function GenerateConnStrings(arg1) {
+  return window['go']['main']['App']['GenerateConnStrings'](arg1);
+}
+
+export function GenerateMigrationGuide(arg1, arg2, arg3) {
+  return window['go']['main']['App']['GenerateMigrationGuide'](arg1, arg2, arg3);
 }
 
 export function GetBackupTables(arg1) {
@@ -34,6 +50,10 @@ export function GetTables(arg1) {
   return window['go']['main']['App']['GetTables'](arg1);
 }
 
+export function LintSQL(arg1) {
+  return window['go']['main']['App']['LintSQL'](arg1);
+}
+
 export function RestoreAllTables(arg1) {
   return window['go']['main']['App']['RestoreAllTables'](arg1);
 }
@@ -48,4 +68,8 @@ export function StartMigration(arg1) {
 
 export function TestConnection(arg1) {
   return window['go']['main']['App']['TestConnection'](arg1);
+}
+
+export function ValidateData(arg1) {
+  return window['go']['main']['App']['ValidateData'](arg1);
 }

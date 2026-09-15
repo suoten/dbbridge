@@ -1,6 +1,6 @@
 # DBBridge 发布打包脚本
 # 用法: powershell -ExecutionPolicy Bypass -File make-release.ps1
-# 用法: powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 1.0.0
+# 用法: powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 1.3.0
 # 产出: release/dbbridge-<version>-<platform>.zip (每个包包含二进制+安装脚本+配置+文档)
 #
 # 流程:
@@ -10,7 +10,7 @@
 #   4. 生成 SHA256 校验文件
 
 param(
-    [string]$Version = "1.0.0"
+    [string]$Version = "1.3.0"
 )
 
 $ErrorActionPreference = "Stop"

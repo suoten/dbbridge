@@ -145,7 +145,7 @@ POST /api/connstr                连接串生成 {ConnectionConfig}
 
 ### 方式一：Windows 用户（最简单）
 
-1. 从 [Releases](https://github.com/suoten/dbbridge/releases) 下载 `dbbridge-1.0.0-windows-amd64.zip`
+1. 从 [Releases](https://github.com/suoten/dbbridge/releases) 下载 `dbbridge-1.3.0-windows-amd64.zip`
 2. 解压后双击 `dbbridge.exe`
 3. 填写源库和目标库的连接信息
 4. 点击"开始迁移"——完成！
@@ -168,13 +168,13 @@ POST /api/connstr                连接串生成 {ConnectionConfig}
 
 ```bash
 # 1. 下载发布包（x86_64 服务器）
-wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-1.0.0-linux-amd64.zip
+wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-1.3.0-linux-amd64.zip
 
 # ARM64 服务器（鲲鹏/飞腾/Kylin）:
-# wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-1.0.0-linux-arm64.zip
+# wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-1.3.0-linux-arm64.zip
 
 # 2. 解压
-unzip dbbridge-1.0.0-linux-amd64.zip
+unzip dbbridge-1.3.0-linux-amd64.zip
 
 # 3. 运行安装脚本
 sudo bash install.sh
@@ -281,7 +281,7 @@ location / {
 如果你是开发者，需要自行打包发布多平台版本，使用 `make-release.ps1` 一键搞定：
 
 ```powershell
-# 默认版本号 1.0.0
+# 默认版本号 1.3.0
 powershell -ExecutionPolicy Bypass -File make-release.ps1
 
 # 指定版本号
@@ -301,9 +301,9 @@ powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 1.2.0
 产物在 `release/` 目录下：
 ```
 release/
-├── dbbridge-1.0.0-linux-amd64.zip
-├── dbbridge-1.0.0-linux-arm64.zip
-├── dbbridge-1.0.0-windows-amd64.zip
+├── dbbridge-1.3.0-linux-amd64.zip
+├── dbbridge-1.3.0-linux-arm64.zip
+├── dbbridge-1.3.0-windows-amd64.zip
 └── checksums.txt
 ```
 
@@ -570,9 +570,9 @@ xattr -cr /Applications/DBBridge.app
 
 ```bash
 # 正确流程
-wget <download-url>/dbbridge-1.0.0-linux-amd64.zip
-unzip dbbridge-1.0.0-linux-amd64.zip
-cd dbbridge-1.0.0-linux-amd64
+wget <download-url>/dbbridge-1.3.0-linux-amd64.zip
+unzip dbbridge-1.3.0-linux-amd64.zip
+cd dbbridge-1.3.0-linux-amd64
 sudo bash install.sh
 ```
 

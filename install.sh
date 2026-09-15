@@ -262,7 +262,7 @@ download_binary() {
     esac
 
     if [[ -z "$DOWNLOAD_URL" ]]; then
-        fatal "未设置下载地址。请设置 DOWNLOAD_URL 环境变量\n  示例: DOWNLOAD_URL=https://github.com/suoten/dbbridge/releases/download/v1.0.0/dbbridge-linux-amd64 sudo bash install.sh"
+        fatal "未设置下载地址。请设置 DOWNLOAD_URL 环境变量\n  示例: DOWNLOAD_URL=https://github.com/suoten/dbbridge/releases/download/v1.3.0/dbbridge-linux-amd64 sudo bash install.sh"
     fi
 
     info "下载 DBBridge 二进制: $DOWNLOAD_URL"
