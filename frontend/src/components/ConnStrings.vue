@@ -77,9 +77,9 @@ async function copy(key: string) {
         <div class="tpl-head">
           <span class="tpl-lang">{{ key }}</span>
           <button class="btn btn-ghost btn-sm" @click="copy(String(key))">
-            <Check v-if="copiedKey === key" :size="14" />
+            <Check v-if="copiedKey === String(key)" :size="14" />
             <Copy v-else :size="14" />
-            {{ copiedKey === key ? '已复制' : '复制' }}
+            {{ copiedKey === String(key) ? '已复制' : '复制' }}
           </button>
         </div>
         <pre class="tpl-code">{{ tpl }}</pre>
