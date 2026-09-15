@@ -49,15 +49,15 @@ if (-not (Test-Path "node_modules")) {
 # 构建前端（必须检查退出码，否则失败后继续编译会打进旧 dist）
 Write-Host "  Building Vue3 frontend..." -ForegroundColor DarkGray
 $viteBuild = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx vite build" -NoNewWindow -Wait -PassThru
-if ($viteBuild.ExitCode -ne 0 -or -not (Test-Path "frontend/dist/index.html")) {
-    # vite build 可能只输出了到 frontend/dist，也可能是 vue-tsc 报错
+if ($viteBuild.ExitCode -ne 0 -or -not (Test-Path "dist/index.html")) {
+    # vite build 可能只输出了到 dist（相对于 frontend 目录），也可能是 vue-tsc 报错
     Write-Host "  First vite build failed (exit $($viteBuild.ExitCode)), retrying..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 1
     $viteBuild = Start-Process -FilePath "cmd.exe" -ArgumentList "/c npx vite build" -NoNewWindow -Wait -PassThru
 }
 
-if (-not (Test-Path "frontend/dist/index.html")) {
-    Write-Host "ERROR: Frontend build failed - frontend/dist/index.html not found" -ForegroundColor Red
+if (-not (Test-Path "dist/index.html")) {
+    Write-Host "ERROR: Frontend build failed - dist/index.html not found" -ForegroundColor Red
     Write-Host "  Try running manually: cd frontend && npm run build" -ForegroundColor Yellow
     Pop-Location
     exit 1

@@ -19,6 +19,7 @@ import (
 	_ "dbbridge/internal/adapter/tidb"
 	"dbbridge/internal/history"
 	"dbbridge/internal/service"
+	"dbbridge/internal/sqllint"
 	types "dbbridge/pkg"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -96,6 +97,7 @@ type App struct {
 	connectionService *service.ConnectionService
 	migrationService  *service.MigrationService
 	backupService     *service.BackupService
+	sqlService        *service.SQLService
 }
 
 // NewApp 创建应用实例
@@ -104,6 +106,7 @@ func NewApp() *App {
 		connectionService: service.NewConnectionService(),
 		migrationService:  service.NewMigrationService(),
 		backupService:     service.NewBackupService(),
+		sqlService:        service.NewSQLService(),
 	}
 }
 
@@ -405,4 +408,71 @@ func (a *App) DeleteBackup(req RestoreRequest) SimpleResult {
 		return SimpleResult{Success: false, Error: err.Error()}
 	}
 	return SimpleResult{Success: true}
+}
+
+// ====================================================================
+// SQL 工具（脚本转换 / 方言体检 / 切换前数据校验）
+// ====================================================================
+
+// LintSQLRequest SQL 方言体检请求
+type LintSQLRequest struct {
+	SourceDialect string `json:"sourceDialect"`
+	TargetDialect string `json:"targetDialect"`
+	SQL           string `json:"sql"`
+}
+
+// ConvertSQL 把 SQL 脚本从源方言转换为目标方言（转换后自动附目标方言体检提示）
+func (a *App) ConvertSQL(req service.ConvertSQLRequest) *service.ConvertSQLResult {
+	return a.sqlService.ConvertSQL(req)
+}
+
+// LintSQL 对 SQL 脚本做源→目标方言兼容性体检（不改写内容，只报告问题）
+func (a *App) LintSQL(req LintSQLRequest) *sqllint.Report {
+	source, err := service.ParseDialect(req.SourceDialect)
+	if err != nil {
+		return &sqllint.Report{SourceDialect: req.SourceDialect, TargetDialect: req.TargetDialect}
+	}
+	target, err := service.ParseDialect(req.TargetDialect)
+	if err != nil {
+		return &sqllint.Report{SourceDialect: req.SourceDialect, TargetDialect: req.TargetDialect}
+	}
+	return sqllint.Lint(source, target, req.SQL)
+}
+
+// ValidateData 切换前数据校验（行数对比 + 抽样逐字段比对，只读不动数据）
+func (a *App) ValidateData(req service.ValidateRequest) *service.ValidateReport {
+	// 全库行数统计+抽样比对可能较慢，给足超时
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Minute)
+	defer cancel()
+	return a.sqlService.ValidateData(ctx, req)
+}
+
+// GenerateMigrationGuide 生成迁移适配指南（只读源库元数据 + 转换预演，不动数据）
+func (a *App) GenerateMigrationGuide(source ConnectionRequest, targetDialect string, tables []string) *service.GuideReport {
+	ctx, cancel := context.WithTimeout(a.ctx, 10*time.Minute)
+	defer cancel()
+	return a.sqlService.GenerateMigrationGuide(ctx, toConfig(source), targetDialect, tables)
+}
+
+// CheckCompatibilityRequest 兼容性检查请求
+type CheckCompatibilityRequest struct {
+	Source ConnectionRequest `json:"source"`
+	Target ConnectionRequest `json:"target"`
+	Tables []string          `json:"tables,omitempty"`
+}
+
+// CheckCompatibility 迁移后扫描目标库结构，与源库逐项对比（只读）
+func (a *App) CheckCompatibility(req CheckCompatibilityRequest) *service.CompatReport {
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Minute)
+	defer cancel()
+	return a.sqlService.CheckCompatibility(ctx, service.CheckCompatParams{
+		Source: toConfig(req.Source),
+		Target: toConfig(req.Target),
+		Tables: req.Tables,
+	})
+}
+
+// GenerateConnStrings 生成各语言连接字符串模板（纯函数不触库）
+func (a *App) GenerateConnStrings(req ConnectionRequest) *service.ConnStrResult {
+	return a.sqlService.GenerateConnStrings(toConfig(req))
 }

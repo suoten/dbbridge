@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"dbbridge/internal/service"
+	"dbbridge/internal/sqllint"
 	types "dbbridge/pkg"
 )
 
@@ -26,6 +27,7 @@ type Server struct {
 	conn    *service.ConnectionService
 	mig     *service.MigrationService
 	backup  *service.BackupService
+	sql     *service.SQLService
 	version string
 }
 
@@ -35,6 +37,7 @@ func Run(port int, assets embed.FS, version string) {
 		conn:    service.NewConnectionService(),
 		mig:     service.NewMigrationService(),
 		backup:  service.NewBackupService(),
+		sql:     service.NewSQLService(),
 		version: version,
 	}
 
@@ -53,6 +56,12 @@ func Run(port int, assets embed.FS, version string) {
 	mux.HandleFunc("/api/backups", s.handleBackups)
 	mux.HandleFunc("/api/backups/restore", s.handleRestoreBackup)
 	mux.HandleFunc("/api/backups/delete", s.handleDeleteBackup)
+	mux.HandleFunc("/api/convert-sql", s.handleConvertSQL)
+	mux.HandleFunc("/api/lint-sql", s.handleLintSQL)
+	mux.HandleFunc("/api/validate", s.handleValidate)
+	mux.HandleFunc("/api/guide", s.handleGuide)
+	mux.HandleFunc("/api/compat", s.handleCompat)
+	mux.HandleFunc("/api/connstr", s.handleConnStr)
 
 	// 静态资源（前端 SPA）
 	dist, err := fs.Sub(assets, "frontend/dist")
@@ -78,7 +87,10 @@ func Run(port int, assets embed.FS, version string) {
 	log.Printf("  POST /api/test-connection {ConnectionConfig}, POST /api/tables {ConnectionConfig},")
 	log.Printf("  POST /api/schema {config, table}, POST /api/migrate {MigrationConfig}（阻塞，返回报告）,")
 	log.Printf("  POST /api/cancel, GET /api/status, GET /api/backups {config},")
-	log.Printf("  POST /api/backups/restore {config, backupName|backupNames}, POST /api/backups/delete {config, backupName}")
+	log.Printf("  POST /api/backups/restore {config, backupName|backupNames}, POST /api/backups/delete {config, backupName},")
+	log.Printf("  POST /api/convert-sql {sourceDialect, targetDialect, sql}, POST /api/lint-sql {sourceDialect, targetDialect, sql},")
+	log.Printf("  POST /api/validate {source, target, tables?, sampleSize?},")
+	log.Printf("  POST /api/guide {config, targetDialect, tables?}, POST /api/compat {source, target, tables?}, POST /api/connstr {config}")
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -263,4 +275,83 @@ func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// handleConvertSQL SQL 脚本方言转换
+func (s *Server) handleConvertSQL(w http.ResponseWriter, r *http.Request) {
+	var req service.ConvertSQLRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.sql.ConvertSQL(req))
+}
+
+// handleLintSQL SQL 方言兼容性体检
+func (s *Server) handleLintSQL(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourceDialect string `json:"sourceDialect"`
+		TargetDialect string `json:"targetDialect"`
+		SQL           string `json:"sql"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	source, err := service.ParseDialect(req.SourceDialect)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	target, err := service.ParseDialect(req.TargetDialect)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, sqllint.Lint(source, target, req.SQL))
+}
+
+// handleValidate 切换前数据校验（只读不动数据）
+func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
+	var req service.ValidateRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	// 全库行数统计+抽样比对可能较慢，给足超时
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.sql.ValidateData(ctx, req))
+}
+
+// handleGuide 迁移适配指南（只读源库元数据 + 转换预演）
+func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Config        types.ConnectionConfig `json:"config"`
+		TargetDialect string                 `json:"targetDialect"`
+		Tables        []string               `json:"tables,omitempty"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.sql.GenerateMigrationGuide(ctx, req.Config, req.TargetDialect, req.Tables))
+}
+
+// handleCompat 迁移后结构兼容性检查（只读）
+func (s *Server) handleCompat(w http.ResponseWriter, r *http.Request) {
+	var req service.CheckCompatParams
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.sql.CheckCompatibility(ctx, req))
+}
+
+// handleConnStr 连接字符串生成（纯函数不触库）
+func (s *Server) handleConnStr(w http.ResponseWriter, r *http.Request) {
+	var req types.ConnectionConfig
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, s.sql.GenerateConnStrings(req))
 }

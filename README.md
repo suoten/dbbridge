@@ -95,6 +95,50 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 - 失败原因明细
 - 迁移历史记录（本地 SQLite 持久化）
 
+### 🧰 迁移配套工具箱
+
+数据搬过去了只是第一步，DBBridge 还内置了 6 个配套工具，帮你处理"程序跟着改"：
+
+| 工具 | 解决什么问题 | 关键特性 |
+|------|--------------|----------|
+| **SQL 脚本转换** | 存量 `.sql` 脚本导入新库报语法错 | mysqldump 风格解析，DDL/INSERT 结构化转换；SELECT 等业务 SQL 自动做表达式级安全改写（`TOP n→LIMIT n`、`GETDATE()→NOW()`、`ISNULL→COALESCE`、标识符引号风格） |
+| **SQL 方言体检** | 业务代码里写死的 SQL 不兼容新库 | 按行列号输出不兼容清单（错误/警告/建议三级 + 改法建议）；字符串与注释不误报；只报告不改写 |
+| **切换前数据校验** | 迁移完了，数据到底对不对？ | 行数对比 + 按主键抽样逐字段比对（浮点容差/时间格式归一化），全程只读 |
+| **结构兼容性检查** | 迁移后目标库结构是否完整 | 列完整性/类型语义/可空性/默认值/自增/索引/外键/字符集 逐项对比，缺失索引和外键直接点名 |
+| **迁移适配指南** | 迁移前评估"业务代码要改多少" | 列类型映射差异清单、触发器/存储过程转换预演（哪些能自动转、哪些必须手写）、目标方言语义提示，只读元数据 |
+| **连接串生成器** | 切库后各语言连接串不会写 | 一键生成 Java JDBC / Python SQLAlchemy / Go DSN / PHP PDO / Node.js 模板；达梦等小众组合如实说明驱动获取方式，不编造 |
+
+> 所有检查/校验/预演类功能均**只读不动数据**；改写类功能只做语义等价的安全替换，
+> 改不了的一律留给体检报告由人工确认，绝不猜着改。
+
+<details>
+<summary>📖 Headless REST API（Linux 服务器模式）</summary>
+
+Linux 服务器上以 `--web` 模式运行时，除 Web 界面外还提供 REST API，可集成到 CI/CD：
+
+```
+GET  /api/health                 健康检查
+GET  /api/version                版本信息
+GET  /api/databases              支持的数据库列表
+POST /api/test-connection        测试连接 {ConnectionConfig}
+POST /api/tables                 表列表 {ConnectionConfig}
+POST /api/schema                 表结构 {config, table}
+POST /api/migrate                迁移（阻塞） {MigrationConfig}
+POST /api/cancel                 取消迁移
+GET  /api/status                 迁移状态
+GET  /api/backups                备份表列表 {config}
+POST /api/backups/restore        恢复备份 {config, backupName|backupNames}
+POST /api/backups/delete         删除备份 {config, backupName}
+POST /api/convert-sql            SQL 脚本转换 {sourceDialect, targetDialect, sql}
+POST /api/lint-sql               SQL 方言体检 {sourceDialect, targetDialect, sql}
+POST /api/validate               切换前数据校验 {source, target, tables?, sampleSize?}
+POST /api/guide                  迁移适配指南 {config, targetDialect, tables?}
+POST /api/compat                 结构兼容性检查 {source, target, tables?}
+POST /api/connstr                连接串生成 {ConnectionConfig}
+```
+
+</details>
+
 ---
 
 ## 🚀 快速开始
@@ -377,12 +421,21 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 wails build -platform linux/arm64
 | 迁移前备份 | 自动备份目标表 | ✅ 推荐 |
 | 自动回滚 | 失败时自动恢复 | ✅ 推荐 |
 
-### 第五步：点击"开始迁移"
+### 第五步：点击“开始迁移”
 
 - 实时进度条
 - 详细日志
 - 迁移完成后查看报告
-- 如果不满意 → "备份管理"页面一键回滚
+- 如果不满意 → “备份管理”页面一键回滚
+
+### 第六步（推荐）：切换前校验
+
+迁移完成后，先别急着切换程序：
+
+1. **数据校验**页面：点“加载源库表”→ 全选 → “开始校验”，确认行数和抽样比对全部一致
+2. **结构兼容性检查**：确认列/索引/外键没有缺失
+3. **迁移指南**页面：查看触发器/存储过程哪些需要人工改写、列类型映射差异
+4. 业务代码里的 SQL 可粘贴到 **SQL 工具**页面做体检，按行号逐条改造
 
 ---
 
@@ -420,8 +473,11 @@ DBBridge/
 │   ├── orchestrator/           # 迁移编排器（调度核心）
 │   ├── migrator/               # 迁移执行器
 │   ├── parser/                 # SQL 文件解析器
+│   ├── sqlexpr/                # SQL 表达式级安全改写（TOP/GETDATE/ISNULL 等）
+│   ├── sqllint/                # SQL 方言体检引擎
+│   ├── webserver/              # Headless REST API 服务（Linux --web 模式）
 │   ├── history/                # 迁移历史记录
-│   ├── service/                # 业务服务层
+│   ├── service/                # 业务服务层（转换/体检/校验/指南/兼容检查/连接串）
 │   ├── typeconv/               # 类型映射
 │   ├── logger/                 # 日志
 │   ├── progress/               # 进度追踪
@@ -437,7 +493,11 @@ DBBridge/
 │   │       ├── ProgressPanel.vue
 │   │       ├── MigrationReport.vue
 │   │       ├── BackupManager.vue
-│   │       └── MigrationHistory.vue
+│   │       ├── MigrationHistory.vue
+│   │       ├── SqlTools.vue         # SQL 转换 + 方言体检
+│   │       ├── DataValidator.vue    # 数据校验 + 结构兼容性检查
+│   │       ├── MigrationGuide.vue   # 迁移适配指南
+│   │       └── ConnStrings.vue      # 连接串生成
 │   ├── package.json
 │   └── vite.config.ts
 └── build/                      # 构建产物

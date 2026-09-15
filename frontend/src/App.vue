@@ -22,14 +22,22 @@ import {
   History,
   Zap,
   Code2,
+  Wand2,
+  ClipboardCheck,
+  Compass,
+  Link2,
 } from '@lucide/vue'
 import ConnectionForm, { type ConnectionConfig } from './components/ConnectionForm.vue'
 import ProgressPanel from './components/ProgressPanel.vue'
 import MigrationReport from './components/MigrationReport.vue'
 import BackupManager from './components/BackupManager.vue'
 import MigrationHistory from './components/MigrationHistory.vue'
+import SqlTools from './components/SqlTools.vue'
+import DataValidator from './components/DataValidator.vue'
+import MigrationGuide from './components/MigrationGuide.vue'
+import ConnStrings from './components/ConnStrings.vue'
 
-type Tab = 'source' | 'tables' | 'migrate' | 'backup'
+type Tab = 'source' | 'tables' | 'migrate' | 'backup' | 'sqltools' | 'validate' | 'guide' | 'connstr'
 
 const activeTab = ref<Tab>('source')
 
@@ -229,6 +237,70 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
             <span class="nav-desc">随时恢复备份数据</span>
           </div>
         </button>
+
+        <!-- SQL 工具（独立菜单） -->
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'sqltools' }"
+          @click="activeTab = 'sqltools'"
+        >
+          <div class="nav-indicator" v-if="activeTab === 'sqltools'"></div>
+          <div class="nav-icon-wrapper">
+            <Wand2 :size="18" class="nav-icon" />
+          </div>
+          <div class="nav-content">
+            <span class="nav-label">SQL 工具</span>
+            <span class="nav-desc">脚本转换与方言体检</span>
+          </div>
+        </button>
+
+        <!-- 数据校验（独立菜单） -->
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'validate' }"
+          @click="activeTab = 'validate'"
+        >
+          <div class="nav-indicator" v-if="activeTab === 'validate'"></div>
+          <div class="nav-icon-wrapper">
+            <ClipboardCheck :size="18" class="nav-icon" />
+          </div>
+          <div class="nav-content">
+            <span class="nav-label">数据校验</span>
+            <span class="nav-desc">切换前核对迁移数据</span>
+          </div>
+        </button>
+
+        <!-- 迁移指南（独立菜单） -->
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'guide' }"
+          @click="activeTab = 'guide'"
+        >
+          <div class="nav-indicator" v-if="activeTab === 'guide'"></div>
+          <div class="nav-icon-wrapper">
+            <Compass :size="18" class="nav-icon" />
+          </div>
+          <div class="nav-content">
+            <span class="nav-label">迁移指南</span>
+            <span class="nav-desc">评估业务代码适配工作</span>
+          </div>
+        </button>
+
+        <!-- 连接串（独立菜单） -->
+        <button
+          class="nav-item"
+          :class="{ active: activeTab === 'connstr' }"
+          @click="activeTab = 'connstr'"
+        >
+          <div class="nav-indicator" v-if="activeTab === 'connstr'"></div>
+          <div class="nav-icon-wrapper">
+            <Link2 :size="18" class="nav-icon" />
+          </div>
+          <div class="nav-content">
+            <span class="nav-label">连接串</span>
+            <span class="nav-desc">生成各语言连接模板</span>
+          </div>
+        </button>
       </nav>
 
       <!-- Sidebar Footer -->
@@ -249,7 +321,12 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
       <!-- Top Bar -->
       <header class="top-bar">
         <h1 class="top-title">{{
-          activeTab === 'backup' ? '备份与回滚' : steps.find(s => s.id === activeTab)?.label
+          activeTab === 'backup' ? '备份与回滚'
+          : activeTab === 'sqltools' ? 'SQL 工具'
+          : activeTab === 'validate' ? '数据校验'
+          : activeTab === 'guide' ? '迁移指南'
+          : activeTab === 'connstr' ? '连接串生成'
+          : steps.find(s => s.id === activeTab)?.label
         }}</h1>
         <div class="top-actions">
           <span v-if="migrating" class="migrating-badge">
@@ -293,6 +370,26 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
 />
 </div>
 </div>
+
+        <!-- ====== SQL 工具页面（独立） ====== -->
+        <div v-else-if="activeTab === 'sqltools'" key="sqltools" class="step-content tool-step">
+          <SqlTools />
+        </div>
+
+        <!-- ====== 数据校验页面（独立） ====== -->
+        <div v-else-if="activeTab === 'validate'" key="validate" class="step-content tool-step">
+          <DataValidator :source-config="sourceConfig" :target-config="targetConfig" />
+        </div>
+
+        <!-- ====== 迁移指南页面（独立） ====== -->
+        <div v-else-if="activeTab === 'guide'" key="guide" class="step-content tool-step">
+          <MigrationGuide :source-config="sourceConfig" />
+        </div>
+
+        <!-- ====== 连接串页面（独立） ====== -->
+        <div v-else-if="activeTab === 'connstr'" key="connstr" class="step-content tool-step">
+          <ConnStrings :source-config="sourceConfig" />
+        </div>
 
           <!-- ====== Step 1: 配置连接 ====== -->
           <div v-else-if="activeTab === 'source'" key="source" class="step-content">
@@ -772,6 +869,11 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
 /* ====== Backup Page ====== */
 .backup-step {
 max-width: 860px;
+}
+
+/* ====== 独立工具页 ====== */
+.tool-step {
+  max-width: 960px;
 }
 
 .backup-section {

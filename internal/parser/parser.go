@@ -84,37 +84,17 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 	hasContent := false
 	startLine := p.lineNum + 1
 
-	for {
-		line, err := p.reader.ReadString('\n')
-		if err == io.EOF {
-			// 文件在引号未闭合时结束，说明语句不完整，明确报错而非静默当作完整语句
-			if inSingleQuote || inDoubleQuote || inBacktick {
-				return nil, fmt.Errorf("parser: 第 %d 行开始的语句在文件末尾引号未闭合", startLine)
-			}
-			// 文件末尾
-			if hasContent {
-				stmt := strings.TrimSpace(sb.String())
-				if stmt != "" {
-					return &Statement{
-						Type:    classifyStatement(stmt, p.dialect),
-						SQL:     stmt,
-						LineNum: startLine,
-					}, nil
-				}
-			}
-			return nil, io.EOF
-		}
-		if err != nil {
-			return nil, fmt.Errorf("parser: 读取失败: %w", err)
-		}
-
+	// processLine 处理一行：更新引号状态、累加语句缓冲，分号命中时返回完整语句。
+	// 提取为闭包以便 EOF 时对"无换行结尾的最后一行"复用同一逻辑
+	// （旧实现 EOF 分支直接丢弃 ReadString 返回的数据，文件末尾无换行时最后一行会静默丢失）。
+	processLine := func(line string) *Statement {
 		p.lineNum++
 		trimmed := strings.TrimSpace(line)
 
 		// 跳过空行和注释
 		if !hasContent {
 			if trimmed == "" || strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "/*") {
-				continue
+				return nil
 			}
 		}
 
@@ -122,7 +102,7 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 		line = stripLineComment(line, inSingleQuote, inDoubleQuote, inBacktick)
 
 		if strings.TrimSpace(line) == "" && !hasContent {
-			continue
+			return nil
 		}
 
 		sb.WriteString(line)
@@ -166,13 +146,53 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 							Type:    classifyStatement(stmt, p.dialect),
 							SQL:     stmt,
 							LineNum: startLine,
-						}, nil
+						}
 					}
 					sb.Reset()
 					hasContent = false
 					startLine = p.lineNum + 1
 				}
 			}
+		}
+		return nil
+	}
+
+	finishStatement := func() (*Statement, error) {
+		// 文件在引号未闭合时结束，说明语句不完整，明确报错而非静默当作完整语句
+		if inSingleQuote || inDoubleQuote || inBacktick {
+			return nil, fmt.Errorf("parser: 第 %d 行开始的语句在文件末尾引号未闭合", startLine)
+		}
+		if hasContent {
+			stmt := strings.TrimSpace(sb.String())
+			if stmt != "" {
+				return &Statement{
+					Type:    classifyStatement(stmt, p.dialect),
+					SQL:     stmt,
+					LineNum: startLine,
+				}, nil
+			}
+		}
+		return nil, io.EOF
+	}
+
+	for {
+		line, err := p.reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, fmt.Errorf("parser: 读取失败: %w", err)
+		}
+
+		if err == io.EOF {
+			// 最后一行可能无换行结尾：处理后再做结尾判断
+			if line != "" {
+				if stmt := processLine(line); stmt != nil {
+					return stmt, nil
+				}
+			}
+			return finishStatement()
+		}
+
+		if stmt := processLine(line); stmt != nil {
+			return stmt, nil
 		}
 	}
 }
