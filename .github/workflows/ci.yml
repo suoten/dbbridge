@@ -27,7 +27,7 @@ jobs:
       # 要求 dist 目录存在，缺了 go build 直接报错（此前 CI 必红的原因）
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Build frontend
         working-directory: frontend
@@ -49,6 +49,7 @@ jobs:
 
       - name: Test (unit)
         # 除 pgcompat（嵌入式 PG e2e）外的所有包必须通过
+        shell: bash
         run: go test $(go list ./... | grep -v adapter/pgcompat) -timeout 10m
 
       - name: Test (embedded PG e2e, non-blocking)

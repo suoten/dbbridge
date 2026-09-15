@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -69,7 +70,14 @@ func TestGenerateMigrationGuideBadDialect(t *testing.T) {
 }
 
 func TestGuideBadConnection(t *testing.T) {
-	src := types.ConnectionConfig{Type: types.SQLite, Database: "Z:\\nonexistent\\nope.db"}
+	// 构建一个父目录不存在的路径，SQLite 无法创建文件（跨平台可靠失败）
+	badDir := filepath.Join(t.TempDir(), "no_such_dir")
+	badPath := filepath.Join(badDir, "nope.db")
+	// 确保父目录确实不存在（t.TempDir 创建了根目录，但子目录不创建）
+	if _, err := os.Stat(badDir); !os.IsNotExist(err) {
+		t.Skipf("无法构造不存在的父目录，跳过: %s", badDir)
+	}
+	src := types.ConnectionConfig{Type: types.SQLite, Database: badPath}
 	r := (&SQLService{}).GenerateMigrationGuide(context.Background(), src, "postgres", nil)
 	if r.Success {
 		t.Errorf("连接失败应报错: %+v", r)
