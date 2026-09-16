@@ -115,15 +115,26 @@ $env:GOOS = ""; $env:GOARCH = ""; $env:CGO_ENABLED = ""
 # --- Windows amd64 (wails build) ---
 Write-Host "  Building windows/amd64 (wails build)..." -ForegroundColor DarkGray
 $env:GOPROXY = "https://goproxy.cn,direct"
+
+# wails CLI 可能安装在 $GOPATH/bin 但不在系统 PATH 中，先尝试补上
+$goBin = "$(go env GOPATH)\bin"
+if ((Test-Path "$goBin\wails.exe") -and ($env:PATH -notlike "*$goBin*")) {
+    $env:PATH = "$goBin;$env:PATH"
+    Write-Host "  Added $goBin to PATH for wails CLI" -ForegroundColor DarkGray
+}
+
 $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 # wails build 会输出到 build/bin/DBBridge.exe
 & wails build -platform windows/amd64 -ldflags $ldflags 2>&1 | Out-Null
 $buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
 $wailsExe = "build/bin/DBBridge.exe"
 if ($buildExit -ne 0 -or -not (Test-Path $wailsExe)) {
-    # 回退到 go build（需要用户机器有 WebView2 运行时）
-    # 注意：go build 缓存不会检测 //go:embed 内容变化，必须加 -a 强制重编译
+    # wails build 失败，回退到 go build
+    # 注意：go build 的 exe 可以用 --web 模式（headless）正常运行，
+    # 但 Wails 桌面 GUI 模式可能缺少运行时初始化
     Write-Host "  wails build failed, falling back to go build..." -ForegroundColor Yellow
+    Write-Host "  WARNING: go build exe may not work as Wails desktop GUI." -ForegroundColor Yellow
+    Write-Host "           Please install wails CLI: go install github.com/wailsapp/wails/v2/cmd/wails@latest" -ForegroundColor Yellow
     $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
     $out = "$distDir/dbbridge-windows-amd64.exe"
     # 删除旧产物，确保不残留
