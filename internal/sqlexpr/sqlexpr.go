@@ -21,7 +21,7 @@ import (
 // isPGFamily / isMySQLFamily / isMSSQL 方言分组
 func isPGFamily(t types.DatabaseType) bool {
 	switch t {
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return true
 	}
 	return false
@@ -29,7 +29,7 @@ func isPGFamily(t types.DatabaseType) bool {
 
 func isMySQLFamily(t types.DatabaseType) bool {
 	switch t {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora:
 		return true
 	}
 	return false

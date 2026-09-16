@@ -713,6 +713,36 @@ func escapeIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
+// ReadDataByPhysicalRowID 基于 SQLite rowid 的物理行游标分页。
+// SQLite 的 rowid 是内置的物理行标识符（整数自增），即使无主键也可用。
+// 返回的每行包含 _physrowid 列存储 rowid，编排器用它推进游标并在写入前移除。
+func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]types.Row, error) {
+	schema, err := a.GetTableSchema(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: 获取表结构失败: %w", err)
+	}
+	cols := schemaColumnNames(schema)
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("sqlite: 表 %s 无可读列", tableName)
+	}
+
+	colList := quoteIdentifiers(cols)
+	var query string
+	var args []any
+	if lastRowID != nil {
+		query = fmt.Sprintf("SELECT %s, rowid AS _physrowid FROM %s WHERE rowid > ? ORDER BY rowid LIMIT ?",
+			colList, escapeIdent(tableName))
+		args = append(args, lastRowID, limit)
+	} else {
+		query = fmt.Sprintf("SELECT %s, rowid AS _physrowid FROM %s ORDER BY rowid LIMIT ?",
+			colList, escapeIdent(tableName))
+		args = append(args, limit)
+	}
+
+	allCols := append(append([]string{}, cols...), "_physrowid")
+	return a.scanRows(ctx, query, args, allCols)
+}
+
 // quoteIdentifiers 给列名加引号
 func quoteIdentifiers(cols []string) string {
 	quoted := make([]string, len(cols))

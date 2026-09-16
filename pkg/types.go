@@ -4,17 +4,33 @@ package types
 type DatabaseType string
 
 const (
+	// 第一阶段：开源主流
 	MySQL       DatabaseType = "mysql"
 	PostgreSQL  DatabaseType = "postgres"
 	SQLite      DatabaseType = "sqlite"
 	MariaDB     DatabaseType = "mariadb"
 	OceanBase   DatabaseType = "oceanbase"
+
+	// 第二阶段：云原生与国产化
 	TiDB        DatabaseType = "tidb"
+	PolarDB     DatabaseType = "polardb"
 	OpenGauss   DatabaseType = "opengauss"
 	Dameng      DatabaseType = "dameng"
 	KingbaseES  DatabaseType = "kingbase"
+	Aurora      DatabaseType = "aurora"
 	CockroachDB DatabaseType = "cockroachdb"
+
+	// 第三阶段：主流商业与 NoSQL
+	Oracle      DatabaseType = "oracle"
 	MSSQL       DatabaseType = "mssql"
+	Db2         DatabaseType = "db2"
+	MongoDB     DatabaseType = "mongodb"
+	Redis       DatabaseType = "redis"
+	Cassandra   DatabaseType = "cassandra"
+	ScyllaDB    DatabaseType = "scylladb"
+	InfluxDB    DatabaseType = "influxdb"
+	TimescaleDB DatabaseType = "timescaledb"
+	TDengine    DatabaseType = "tdengine"
 )
 
 // ConnectionConfig 数据库连接配置

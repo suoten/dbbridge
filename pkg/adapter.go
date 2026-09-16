@@ -82,6 +82,19 @@ type SequenceFixer interface {
 	FixAutoIncrementSequences(ctx context.Context, tableName string, columns []ColumnMeta) error
 }
 
+// PhysicalRowIDReader 可选能力：无主键表的物理行标识符游标分页。
+//
+// 当表没有主键也没有单列唯一索引时，OFFSET 深翻页性能 O(N)。
+// 实现此接口的适配器可以使用数据库的物理行标识符（如 PostgreSQL ctid、
+// Oracle ROWID、MSSQL %%physloc%%）做游标分页，将复杂度降为 O(1)。
+//
+// 编排器会优先使用主键游标 > 唯一索引游标 > 物理行ID游标 > OFFSET 兜底。
+type PhysicalRowIDReader interface {
+	// ReadDataByPhysicalRowID 基于物理行标识符的游标分页读取。
+	// lastRowID 为上一批末行的物理行ID（nil 表示从头开始），返回值中包含物理行ID用于下一批。
+	ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]Row, error)
+}
+
 // AdapterFactory 适配器工厂函数类型
 type AdapterFactory func() DatabaseAdapter
 

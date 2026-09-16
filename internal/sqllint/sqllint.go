@@ -59,7 +59,7 @@ type rule struct {
 // isPGTarget / isMySQLTarget / isMSSQLTarget / isDamengTarget 方言分组
 func isPGTarget(t types.DatabaseType) bool {
 	switch t {
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return true
 	}
 	return false
@@ -67,13 +67,17 @@ func isPGTarget(t types.DatabaseType) bool {
 
 func isMySQLTarget(t types.DatabaseType) bool {
 	switch t {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora:
 		return true
 	}
 	return false
 }
 
 func isDamengTarget(t types.DatabaseType) bool { return t == types.Dameng }
+
+func isOracleTarget(t types.DatabaseType) bool { return t == types.Oracle }
+
+func isDb2Target(t types.DatabaseType) bool { return t == types.Db2 }
 
 func isMSSQLTarget(t types.DatabaseType) bool { return t == types.MSSQL }
 

@@ -43,26 +43,36 @@ const testing = ref(false)
 const testResult = ref<{ success: boolean; version?: string; error?: string } | null>(null)
 
 const dbTypes = [
-  // 开源主流
+  // 第一阶段：开源主流
   { value: 'mysql', label: 'MySQL', icon: Database, group: '开源' },
   { value: 'mariadb', label: 'MariaDB', icon: Database, group: '开源' },
   { value: 'postgres', label: 'PostgreSQL', icon: Database, group: '开源' },
   { value: 'sqlite', label: 'SQLite', icon: HardDrive, group: '开源' },
-  // 云原生 & 分布式
-  { value: 'tidb', label: 'TiDB', icon: Database, group: '分布式' },
-  { value: 'oceanbase', label: 'OceanBase', icon: Database, group: '分布式' },
-  { value: 'cockroachdb', label: 'CockroachDB', icon: Database, group: '分布式' },
-  // 国产数据库
-  { value: 'opengauss', label: 'openGauss', icon: Database, group: '国产' },
-  { value: 'dameng', label: '达梦 DM', icon: Database, group: '国产' },
-  { value: 'kingbase', label: '金仓 KingbaseES', icon: Database, group: '国产' },
-  // 商业数据库
-  { value: 'mssql', label: 'SQL Server', icon: Server, group: '商业' },
+  // 第二阶段：云原生与国产化
+  { value: 'tidb', label: 'TiDB', icon: Database, group: '云原生/国产' },
+  { value: 'oceanbase', label: 'OceanBase', icon: Database, group: '云原生/国产' },
+  { value: 'polardb', label: 'PolarDB', icon: Database, group: '云原生/国产' },
+  { value: 'aurora', label: 'Amazon Aurora', icon: Database, group: '云原生/国产' },
+  { value: 'cockroachdb', label: 'CockroachDB', icon: Database, group: '云原生/国产' },
+  { value: 'opengauss', label: 'openGauss', icon: Database, group: '云原生/国产' },
+  { value: 'dameng', label: '达梦 DM', icon: Database, group: '云原生/国产' },
+  { value: 'kingbase', label: '金仓 KingbaseES', icon: Database, group: '云原生/国产' },
+  { value: 'timescaledb', label: 'TimescaleDB', icon: Database, group: '云原生/国产' },
+  // 第三阶段：主流商业与 NoSQL
+  { value: 'oracle', label: 'Oracle', icon: Server, group: '商业/NoSQL' },
+  { value: 'mssql', label: 'SQL Server', icon: Server, group: '商业/NoSQL' },
+  { value: 'db2', label: 'IBM Db2', icon: Server, group: '商业/NoSQL', experimental: true },
+  { value: 'mongodb', label: 'MongoDB', icon: Database, group: '商业/NoSQL', experimental: true },
+  { value: 'redis', label: 'Redis', icon: Database, group: '商业/NoSQL', experimental: true },
+  { value: 'cassandra', label: 'Cassandra', icon: Database, group: '商业/NoSQL', experimental: true },
+  { value: 'scylladb', label: 'ScyllaDB', icon: Database, group: '商业/NoSQL', experimental: true },
+  { value: 'influxdb', label: 'InfluxDB', icon: Database, group: '商业/NoSQL', experimental: true },
+  { value: 'tdengine', label: 'TDengine', icon: Database, group: '商业/NoSQL', experimental: true },
 ]
 
 const isSQLite = computed(() => props.modelValue.type === 'sqlite')
 const isMSSQL = computed(() => props.modelValue.type === 'mssql')
-const isPostgresLike = computed(() => ['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(props.modelValue.type))
+const isPostgresLike = computed(() => ['postgres', 'opengauss', 'kingbase', 'cockroachdb', 'timescaledb'].includes(props.modelValue.type))
 const isPostgres = isPostgresLike
 
 const selectedDbType = computed(() => dbTypes.find(t => t.value === props.modelValue.type))
@@ -90,7 +100,25 @@ function update(field: keyof ConnectionConfig, value: any) {
       newConfig.port = 5236
     } else if (value === 'mssql') {
       newConfig.port = 1433
-    } else if (['postgres', 'opengauss', 'kingbase', 'cockroachdb'].includes(value)) {
+    } else if (value === 'oracle') {
+      newConfig.port = 1521
+    } else if (value === 'db2') {
+      newConfig.port = 50000
+    } else if (value === 'mongodb') {
+      newConfig.port = 27017
+    } else if (value === 'redis') {
+      newConfig.port = 6379
+    } else if (value === 'cassandra' || value === 'scylladb') {
+      newConfig.port = 9042
+    } else if (value === 'influxdb') {
+      newConfig.port = 8086
+    } else if (value === 'tdengine') {
+      newConfig.port = 6030
+    } else if (value === 'polardb') {
+      newConfig.port = 3306
+    } else if (value === 'aurora') {
+      newConfig.port = 3306
+    } else if (['postgres', 'opengauss', 'kingbase', 'cockroachdb', 'timescaledb'].includes(value)) {
       newConfig.port = 5432
     }
     // SQLite 用文件路径，其他数据库用库名，语义不同，切换时清空避免残留（如 :memory:）
@@ -163,6 +191,7 @@ async function handleTest() {
             >
               <component :is="t.icon" :size="16" />
               {{ t.label }}
+              <span v-if="(t as any).experimental" class="experimental-badge" title="实验性支持：数据模型与关系型数据库差异较大，迁移时可能有类型映射限制">实验</span>
             </button>
           </div>
         </div>
@@ -429,6 +458,18 @@ async function handleTest() {
 .db-type-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.experimental-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--color-warning-light, #fef3c7);
+  color: var(--color-warning, #d97706);
+  line-height: 1.2;
+  margin-left: 2px;
 }
 
 /* Form rows */

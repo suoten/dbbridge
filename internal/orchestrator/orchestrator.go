@@ -557,11 +557,19 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 			}
 		}
 		useKeyset := pkCol != ""
-		if !useKeyset {
+		// 无主键/唯一索引时，检查适配器是否支持物理行ID游标分页（避免 OFFSET 深翻页 O(N)）
+		usePhysRowID := !useKeyset
+		if usePhysRowID {
+			if _, ok := o.sourceAdapter.(types.PhysicalRowIDReader); !ok {
+				usePhysRowID = false
+			}
+		}
+		if !useKeyset && !usePhysRowID {
 			o.log("WARN", tableName, "表无主键/可用唯一索引，回退 OFFSET 分页：源库存在并发写入或执行计划变化时可能漏行/重复行，建议迁完后核对行数")
 		}
 
 		var lastKey any
+		var lastPhysRowID any
 		offset := 0
 		for {
 			if ctx.Err() != nil {
@@ -572,6 +580,9 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 			var err error
 			if useKeyset {
 				rows, err = o.sourceAdapter.ReadDataKeyset(ctx, tableName, pkCol, lastKey, batchSize)
+			} else if usePhysRowID {
+				physReader := o.sourceAdapter.(types.PhysicalRowIDReader)
+				rows, err = physReader.ReadDataByPhysicalRowID(ctx, tableName, lastPhysRowID, batchSize)
 			} else {
 				rows, err = o.sourceAdapter.ReadData(ctx, tableName, offset, batchSize)
 			}
@@ -605,12 +616,20 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 					return processed, fmt.Errorf("主键列 %s 存在 NULL 值，无法使用游标分页，请为该列补充 NOT NULL 约束或去除 NULL 数据后重试", pkCol)
 				}
 			}
+			if usePhysRowID && len(rows) > 0 {
+				// 物理行ID存储在特殊列名 _physrowid 中
+				lastPhysRowID = rows[len(rows)-1]["_physrowid"]
+				// 从数据行中移除物理行ID列，不写入目标库
+				for i := range rows {
+					delete(rows[i], "_physrowid")
+				}
+			}
 			processed += int64(len(rows))
 			offset += len(rows)
 			o.reportProgress(ctx, "data", tableName, processed, totalRows)
 
-			// keyset 模式靠空批结束；OFFSET 模式可提前结束
-			if !useKeyset && processed >= totalRows {
+			// keyset/physRowID 模式靠空批结束；OFFSET 模式可提前结束
+			if !useKeyset && !usePhysRowID && processed >= totalRows {
 				break
 			}
 		}

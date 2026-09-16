@@ -673,6 +673,9 @@ func (a *Base) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) {
 			ForEachRow: orientation == "ROW",
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历触发器失败: %w", a.brand(), err)
+	}
 	return triggers, nil
 }
 
@@ -708,19 +711,22 @@ func (a *Base) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
 		}
 		routines = append(routines, routine)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历存储过程失败: %w", a.brand(), err)
+	}
 	return routines, nil
 }
 
 // GenerateTriggerDDL 将触发器转换为目标方言的 DDL
 func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.Dameng:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.Dameng, types.PolarDB, types.Aurora:
 		var sb strings.Builder
 		sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
 			escapeIdent(trigger.Name), trigger.Timing, trigger.Event, escapeIdent(trigger.Table)))
 		sb.WriteString(trigger.Body)
 		return sb.String(), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.SQLite:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB, types.SQLite:
 		// PL/pgSQL 与 MySQL 触发器体语法差异大（变量引用、异常处理、 EXECUTE FUNCTION 机制），
 		// SQLite 方言也不兼容（DELIMITER、DEFINER、变量声明均不同），
 		// 拼接产物必然非法且会造成“已迁移”假象，明确拒绝比静默产出坏 SQL 更安全
@@ -733,14 +739,14 @@ func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types
 // GenerateRoutineDDL 将存储过程/函数转换为目标方言的 DDL
 func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.Dameng:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.Dameng, types.PolarDB, types.Aurora:
 		if routine.Type == "function" {
 			return fmt.Sprintf("CREATE FUNCTION `%s`() RETURNS %s\nBEGIN\n%s\nEND",
 				escapeIdent(routine.Name), routine.Returns, routine.Body), nil
 		}
 		return fmt.Sprintf("CREATE PROCEDURE `%s`()\nBEGIN\n%s\nEND",
 			escapeIdent(routine.Name), routine.Body), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.SQLite:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB, types.SQLite:
 		// 同触发器：语法转换非拼接可实现，明确拒绝
 		return "", fmt.Errorf("%s: 暂不支持将存储过程/函数自动转换为 %s 方言，请手动迁移（%s）", a.brand(), targetDialect, routine.Name)
 	default:
@@ -784,6 +790,82 @@ func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMet
 // escapeIdent 转义 MySQL 标识符，防止 SQL 注入
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "`", "``")
+}
+
+// ReadDataByPhysicalRowID 基于 MySQL 窗口函数的伪行号游标分页。
+// MySQL 没有 Oracle ROWID / PG ctid 这样的物理行标识符，
+// 但 MySQL 8.0+ 支持 ROW_NUMBER() 窗口函数，可以用行号做游标分页。
+// 注意：行号是查询时的逻辑序号，必须配合 ORDER BY 保证稳定性。
+// 返回的每行包含 _physrowid 列存储行号，编排器用它推进游标并在写入前移除。
+func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]types.Row, error) {
+	schema, err := a.GetTableSchema(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 获取表结构失败: %w", a.brand(), err)
+	}
+	cols := schemaColumnNames(schema)
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("%s: 表 %s 无可读列", a.brand(), tableName)
+	}
+
+	colList := quoteIdentifiers(cols)
+	// 使用 CTE + ROW_NUMBER() 实现稳定行号分页
+	// 行号从 1 开始，lastRowID 是上一批末行的行号
+	var query string
+	var args []any
+	if lastRowID != nil {
+		query = fmt.Sprintf(
+			"WITH numbered AS ("+
+				"SELECT %s, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn "+
+				"FROM `%s`"+
+			") SELECT *, rn AS _physrowid FROM numbered WHERE rn > ? ORDER BY rn LIMIT ?",
+			colList, escapeIdent(tableName))
+		args = append(args, lastRowID, limit)
+	} else {
+		query = fmt.Sprintf(
+			"WITH numbered AS ("+
+				"SELECT %s, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn "+
+				"FROM `%s`"+
+			") SELECT *, rn AS _physrowid FROM numbered ORDER BY rn LIMIT ?",
+			colList, escapeIdent(tableName))
+		args = append(args, limit)
+	}
+
+	// 使用动态列扫描（CTE 会返回 colList + rn + _physrowid）
+	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询数据失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	colNames, err := rows.Columns()
+	if err != nil {
+		return nil, fmt.Errorf("%s: 获取列名失败: %w", a.brand(), err)
+	}
+
+	var result []types.Row
+	for rows.Next() {
+		values := make([]any, len(colNames))
+		ptrs := make([]any, len(colNames))
+		for i := range values {
+			ptrs[i] = &values[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, fmt.Errorf("%s: 读取数据失败: %w", a.brand(), err)
+		}
+		row := make(types.Row)
+		for i, col := range colNames {
+			if b, ok := values[i].([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = values[i]
+			}
+		}
+		result = append(result, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历数据失败: %w", a.brand(), err)
+	}
+	return result, nil
 }
 
 // escapeSingleQuote 转义单引号

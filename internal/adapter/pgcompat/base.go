@@ -794,7 +794,7 @@ func (a *Base) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) {
 // GenerateTriggerDDL 将触发器转换为目标方言的 DDL
 func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return trigger.Body, nil // PG 系内原样输出
 	default:
 		// trigger.Body 是 pg_get_triggerdef 生成的完整 CREATE TRIGGER 语句，
@@ -809,7 +809,7 @@ func (a *Base) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types
 // GenerateRoutineDDL 将存储过程/函数转换为目标方言的 DDL
 func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return routine.Body, nil // PG 系内原样输出
 	default:
 		// routine.Body 是 pg_get_functiondef 生成的完整 CREATE FUNCTION 语句，
@@ -872,6 +872,39 @@ func (a *Base) FixAutoIncrementSequences(ctx context.Context, tableName string, 
 // escapeIdent 转义 PostgreSQL 标识符
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "\"", "\"\"")
+}
+
+// ReadDataByPhysicalRowID 基于 PostgreSQL ctid 的物理行游标分页。
+// ctid 是 PostgreSQL 内置的物理行标识符（page号, 行号），即使无主键也可做 O(1) 游标分页。
+// 返回的每行包含 _physrowid 列存储 ctid 字符串，编排器用它推进游标并在写入前移除。
+func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]types.Row, error) {
+	schema, err := a.GetTableSchema(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 获取表结构失败: %w", a.brand(), err)
+	}
+	cols := schemaColumnNames(schema)
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("%s: 表 %s 无可读列", a.brand(), tableName)
+	}
+
+	// 构造 SELECT 列列表 + ctid AS _physrowid
+	colList := quoteIdentifiers(cols)
+	var query string
+	var args []any
+	if lastRowID != nil {
+		// ctid 是复合类型 (page,offset)，比较用 tid > '(page,offset)'::tid
+		query = fmt.Sprintf(`SELECT %s, ctid::text AS _physrowid FROM "%s" WHERE ctid > $1::tid ORDER BY ctid LIMIT $2`,
+			colList, escapeIdent(tableName))
+		args = append(args, lastRowID, limit)
+	} else {
+		query = fmt.Sprintf(`SELECT %s, ctid::text AS _physrowid FROM "%s" ORDER BY ctid LIMIT $1`,
+			colList, escapeIdent(tableName))
+		args = append(args, limit)
+	}
+
+	// scanRows 需要包含 _physrowid 列
+	allCols := append(append([]string{}, cols...), "_physrowid")
+	return a.scanRows(ctx, query, args, allCols)
 }
 
 // escapeSingleQuote 转义单引号

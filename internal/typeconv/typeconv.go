@@ -421,3 +421,257 @@ func fallback(col types.ColumnMeta, def string) string {
 	}
 	return def
 }
+
+// ToOracle 中立类型 → Oracle 类型
+func ToOracle(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt:
+		return "NUMBER(3)"
+	case KindSmallInt, KindYear:
+		return "NUMBER(5)"
+	case KindInt:
+		return "NUMBER(10)"
+	case KindBigInt:
+		return "NUMBER(19)"
+	case KindDecimal:
+		if col.Precision != nil && col.Scale != nil {
+			return fmt.Sprintf("NUMBER(%d, %d)", *col.Precision, *col.Scale)
+		}
+		return "NUMBER"
+	case KindFloat:
+		return "BINARY_FLOAT"
+	case KindDouble:
+		return "BINARY_DOUBLE"
+	case KindBool:
+		return "NUMBER(1)"
+	case KindBit:
+		return "RAW(1)"
+	case KindChar:
+		return toSize("CHAR", col.Length, 1)
+	case KindVarChar:
+		return toSize("VARCHAR2", col.Length, 255)
+	case KindText:
+		return "CLOB"
+	case KindBlob, KindBinary:
+		return "BLOB"
+	case KindDate:
+		return "DATE"
+	case KindTime:
+		return "TIMESTAMP"
+	case KindDateTime:
+		return "TIMESTAMP"
+	case KindTimestamp:
+		return "TIMESTAMP"
+	case KindJSON:
+		return "CLOB"
+	case KindUUID:
+		return "VARCHAR2(36)"
+	case KindEnum, KindSet:
+		return "VARCHAR2(200)"
+	default:
+		return fallback(col, "CLOB")
+	}
+}
+
+// ToDb2 中立类型 → IBM Db2 类型
+func ToDb2(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt:
+		return "SMALLINT"
+	case KindSmallInt, KindYear:
+		return "SMALLINT"
+	case KindInt:
+		return "INTEGER"
+	case KindBigInt:
+		return "BIGINT"
+	case KindDecimal:
+		if col.Precision != nil && col.Scale != nil {
+			return fmt.Sprintf("DECIMAL(%d, %d)", *col.Precision, *col.Scale)
+		}
+		return "DECIMAL(31,0)"
+	case KindFloat:
+		return "REAL"
+	case KindDouble:
+		return "DOUBLE"
+	case KindBool:
+		return "SMALLINT"
+	case KindBit:
+		return "CHAR(1) FOR BIT DATA"
+	case KindChar:
+		return toSize("CHARACTER", col.Length, 1)
+	case KindVarChar:
+		return toSize("VARCHAR", col.Length, 255)
+	case KindText:
+		return "CLOB(1M)"
+	case KindBlob, KindBinary:
+		return "BLOB(1M)"
+	case KindDate:
+		return "DATE"
+	case KindTime:
+		return "TIME"
+	case KindDateTime, KindTimestamp:
+		return "TIMESTAMP"
+	case KindJSON:
+		return "CLOB(1M)"
+	case KindUUID:
+		return "VARCHAR(36)"
+	case KindEnum, KindSet:
+		return "VARCHAR(200)"
+	default:
+		return fallback(col, "CLOB(1M)")
+	}
+}
+
+// ToMongoDB 中立类型 → MongoDB BSON 类型
+func ToMongoDB(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt, KindSmallInt, KindInt, KindYear:
+		return "int32"
+	case KindBigInt:
+		return "int64"
+	case KindDecimal, KindFloat, KindDouble:
+		return "double"
+	case KindBool, KindBit:
+		return "bool"
+	case KindChar, KindVarChar, KindText, KindEnum, KindSet, KindUUID:
+		return "string"
+	case KindBlob, KindBinary:
+		return "binData"
+	case KindDate, KindTime, KindDateTime, KindTimestamp:
+		return "date"
+	case KindJSON:
+		return "object"
+	default:
+		return "string"
+	}
+}
+
+// ToRedis 中立类型 → Redis 类型（Redis 只有 string，这里返回语义类型名）
+func ToRedis(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt, KindSmallInt, KindInt, KindBigInt, KindYear:
+		return "string:int"
+	case KindDecimal, KindFloat, KindDouble:
+		return "string:float"
+	case KindBool, KindBit:
+		return "string:bool"
+	case KindDate, KindTime, KindDateTime, KindTimestamp:
+		return "string:datetime"
+	case KindJSON:
+		return "hash"
+	case KindBlob, KindBinary:
+		return "string:bytes"
+	default:
+		return "string"
+	}
+}
+
+// ToCassandra 中立类型 → Cassandra/ScyllaDB CQL 类型
+func ToCassandra(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt:
+		return "TINYINT"
+	case KindSmallInt, KindYear:
+		return "SMALLINT"
+	case KindInt:
+		return "INT"
+	case KindBigInt:
+		return "BIGINT"
+	case KindDecimal:
+		if col.Precision != nil && col.Scale != nil {
+			return fmt.Sprintf("DECIMAL(%d, %d)", *col.Precision, *col.Scale)
+		}
+		return "DECIMAL"
+	case KindFloat:
+		return "FLOAT"
+	case KindDouble:
+		return "DOUBLE"
+	case KindBool, KindBit:
+		return "BOOLEAN"
+	case KindChar:
+		return toSize("TEXT", col.Length, 1)
+	case KindVarChar:
+		return toSize("TEXT", col.Length, 255)
+	case KindText:
+		return "TEXT"
+	case KindBlob, KindBinary:
+		return "BLOB"
+	case KindDate:
+		return "DATE"
+	case KindTime:
+		return "TIME"
+	case KindDateTime, KindTimestamp:
+		return "TIMESTAMP"
+	case KindJSON:
+		return "TEXT"
+	case KindUUID:
+		return "UUID"
+	case KindEnum, KindSet:
+		return "TEXT"
+	default:
+		return fallback(col, "TEXT")
+	}
+}
+
+// ToInfluxDB 中立类型 → InfluxDB Flux 类型
+func ToInfluxDB(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt, KindSmallInt, KindInt, KindYear:
+		return "INT"
+	case KindBigInt:
+		return "INT"
+	case KindDecimal, KindFloat, KindDouble:
+		return "FLOAT"
+	case KindBool, KindBit:
+		return "BOOLEAN"
+	case KindDate, KindTime, KindDateTime, KindTimestamp:
+		return "TIMESTAMP"
+	case KindChar, KindVarChar, KindText, KindEnum, KindSet, KindUUID, KindJSON:
+		return "STRING"
+	case KindBlob, KindBinary:
+		return "STRING"
+	default:
+		return "STRING"
+	}
+}
+
+// ToTDengine 中立类型 → TDengine 类型
+func ToTDengine(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt:
+		return "TINYINT"
+	case KindSmallInt, KindYear:
+		return "SMALLINT"
+	case KindInt:
+		return "INT"
+	case KindBigInt:
+		return "BIGINT"
+	case KindDecimal:
+		// TDengine 不支持 DECIMAL，用 DOUBLE 替代
+		return "DOUBLE"
+	case KindFloat:
+		return "FLOAT"
+	case KindDouble:
+		return "DOUBLE"
+	case KindBool, KindBit:
+		return "BOOL"
+	case KindChar, KindVarChar:
+		return toSize("VARCHAR", col.Length, 255)
+	case KindText, KindJSON:
+		return "NCHAR(255)"
+	case KindBlob, KindBinary:
+		return "NCHAR(255)"
+	case KindDate:
+		return "DATE"
+	case KindTime:
+		return "TIMESTAMP"
+	case KindDateTime, KindTimestamp:
+		return "TIMESTAMP"
+	case KindUUID:
+		return "VARCHAR(36)"
+	case KindEnum, KindSet:
+		return "VARCHAR(200)"
+	default:
+		return fallback(col, "NCHAR(255)")
+	}
+}

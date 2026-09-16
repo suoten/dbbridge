@@ -76,7 +76,7 @@ func (c *Converter) convertCreateIndex(ddl string) (string, error) {
 	}
 
 	switch c.targetDialect {
-	case types.MySQL, types.MariaDB:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
 		sb.WriteString(fmt.Sprintf("`%s` ON `%s` (", idx.Name, table))
 	case types.PostgreSQL:
 		sb.WriteString(fmt.Sprintf("\"%s\" ON \"%s\" (", idx.Name, table))
@@ -91,9 +91,9 @@ func (c *Converter) convertCreateIndex(ddl string) (string, error) {
 			sb.WriteString(", ")
 		}
 		switch c.targetDialect {
-		case types.MySQL, types.MariaDB:
-			sb.WriteString(fmt.Sprintf("`%s`", col))
-		case types.PostgreSQL, types.SQLite:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
+		sb.WriteString(fmt.Sprintf("`%s`", col))
+		case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB, types.SQLite:
 			sb.WriteString(fmt.Sprintf("\"%s\"", col))
 		default:
 			sb.WriteString(col)
@@ -121,9 +121,9 @@ func (c *Converter) convertDropTable(ddl string) (string, error) {
 // 主要是处理引号差异，比如 MySQL 的反引号在 PostgreSQL 中需要改成双引号
 func (c *Converter) convertInsert(ddl string) (string, error) {
 	switch c.targetDialect {
-	case types.MySQL, types.MariaDB:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
 		return ddl, nil // MySQL 源和目标一致时不需要转换
-	case types.PostgreSQL, types.SQLite:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB, types.SQLite:
 		// 将反引号标识符替换为双引号，但跳过单引号字符串字面量内部，
 		// 避免改写数据内容（如 INSERT 值中的 `code`）
 		converted := replaceBackticksOutsideStrings(ddl)

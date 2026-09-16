@@ -36,7 +36,7 @@ func convertMSSQLTriggerToMySQL(trigger types.TriggerMeta) string {
 	primaryEvent := strings.TrimSpace(events[0])
 
 	sb.WriteString(fmt.Sprintf("CREATE TRIGGER `%s` %s %s ON `%s` FOR EACH ROW\n",
-		trigger.Name, trigger.Timing, primaryEvent, trigger.Table))
+		escapeIdentTrigger(trigger.Name), trigger.Timing, primaryEvent, escapeIdentTrigger(trigger.Table)))
 	sb.WriteString("BEGIN\n")
 
 	// 转换触发器体。
@@ -73,7 +73,7 @@ func convertMSSQLTriggerToPG(trigger types.TriggerMeta) string {
 	}
 
 	// PG 需要先创建函数，再创建触发器
-	sb.WriteString(fmt.Sprintf("CREATE OR REPLACE FUNCTION \"%s_fn\"() RETURNS TRIGGER AS $$\n", trigger.Name))
+	sb.WriteString(fmt.Sprintf("CREATE OR REPLACE FUNCTION \"%s_fn\"() RETURNS TRIGGER AS $$\n", escapeIdentPG(trigger.Name)))
 
 	// 转换触发器体（剥离 CREATE TRIGGER 头，见 convertMSSQLTriggerToMySQL 注释）
 	body := trigger.Body
@@ -95,7 +95,7 @@ func convertMSSQLTriggerToPG(trigger types.TriggerMeta) string {
 
 	sb.WriteString("\nRETURN NEW;\nEND;\n$$ LANGUAGE plpgsql;\n\n")
 	sb.WriteString(fmt.Sprintf("CREATE TRIGGER \"%s\" %s %s ON \"%s\" FOR EACH ROW EXECUTE FUNCTION \"%s_fn\"();",
-		trigger.Name, timing, primaryEvent, trigger.Table, trigger.Name))
+		escapeIdentPG(trigger.Name), timing, primaryEvent, escapeIdentPG(trigger.Table), escapeIdentPG(trigger.Name)))
 
 	return sb.String()
 }
@@ -115,7 +115,7 @@ func convertMSSQLTriggerToSQLite(trigger types.TriggerMeta) string {
 	}
 
 	sb.WriteString(fmt.Sprintf("CREATE TRIGGER %s %s %s ON %s FOR EACH ROW\n",
-		trigger.Name, timing, primaryEvent, trigger.Table))
+		escapeIdentSQLite(trigger.Name), timing, primaryEvent, escapeIdentSQLite(trigger.Table)))
 	sb.WriteString("BEGIN\n")
 
 	body := trigger.Body
@@ -468,4 +468,19 @@ func stripMSSQLTriggerBody(body string) string {
 	}
 	// 已是裸过程体（如来自 information_schema）则原样返回
 	return body
+}
+
+// escapeIdentTrigger 转义 MySQL 反引号标识符（反引号双写）
+func escapeIdentTrigger(name string) string {
+	return strings.ReplaceAll(name, "`", "``")
+}
+
+// escapeIdentPG 转义 PostgreSQL 双引号标识符（双引号双写）
+func escapeIdentPG(name string) string {
+	return strings.ReplaceAll(name, `"`, `""`)
+}
+
+// escapeIdentSQLite 转义 SQLite 双引号标识符，返回带引号的完整标识符
+func escapeIdentSQLite(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }

@@ -10,7 +10,7 @@
 #   4. 生成 SHA256 校验文件
 
 param(
-    [string]$Version = "1.3.0"
+    [string]$Version = "2.0.0"
 )
 
 $ErrorActionPreference = "Stop"

@@ -56,21 +56,43 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 - **单文件 < 30MB**，下载双击即可运行
 
 ### 🗄️ 多数据库支持
+
+#### 第一阶段：开源主流
 | 数据库 | 作为源库 | 作为目标库 |
 |--------|:--------:|:--------:|
 | **MySQL** (5.7/8.0+) | ✅ | ✅ |
 | **PostgreSQL** (14/16/17+) | ✅ | ✅ |
 | **SQLite** (3.x) | ✅ | ✅ |
 | **MariaDB** | ✅ | ✅ |
-| **OceanBase** | ✅ | ✅ |
+| **OceanBase** (MySQL模式) | ✅ | ✅ |
+
+#### 第二阶段：云原生与国产化
+| 数据库 | 作为源库 | 作为目标库 |
+|--------|:--------:|:--------:|
 | **TiDB** | ✅ | ✅ |
+| **PolarDB** (MySQL兼容) | ✅ | ✅ |
 | **openGauss** | ✅ | ✅ |
 | **达梦 DM8** | ✅ | ✅ |
 | **人大金仓 KingbaseES** | ✅ | ✅ |
+| **Amazon Aurora** (MySQL兼容) | ✅ | ✅ |
 | **CockroachDB** | ✅ | ✅ |
-| **SQL Server (MSSQL)** | ✅ | ✅ |
+| **TimescaleDB** | ✅ | ✅ |
 
-> 以上 11 种数据库可以**任意两两互转**（N × N 组合）。
+#### 第三阶段：主流商业与 NoSQL
+| 数据库 | 作为源库 | 作为目标库 |
+|--------|:--------:|:--------:|
+| **Oracle** | ✅ | ✅ |
+| **SQL Server (MSSQL)** | ✅ | ✅ |
+| **IBM Db2** | ✅ | ✅ |
+| **MongoDB** | ✅ | ✅ |
+| **Redis** | ✅ | ✅ |
+| **Cassandra** | ✅ | ✅ |
+| **ScyllaDB** | ✅ | ✅ |
+| **InfluxDB** | ✅ | ✅ |
+| **TDengine** | ✅ | ✅ |
+
+> 以上 22 种数据库可以**任意两两互转**（N × N 组合）。
+> NoSQL/时序数据库（MongoDB/Redis/Cassandra/ScyllaDB/InfluxDB/TDengine）通过语义映射实现与关系型数据库的互转。
 
 ### 🛡️ 安全可靠
 - **迁移前自动备份**：目标库的同名表自动重命名为 `_bak_` 前缀
@@ -145,7 +167,7 @@ POST /api/connstr                连接串生成 {ConnectionConfig}
 
 ### 方式一：Windows 用户（最简单）
 
-1. 从 [Releases](https://github.com/suoten/dbbridge/releases) 下载 `dbbridge-1.3.0-windows-amd64.zip`
+1. 从 [Releases](https://github.com/suoten/dbbridge/releases) 下载 `dbbridge-2.0.0-windows-amd64.zip`
 2. 解压后双击 `dbbridge.exe`
 3. 填写源库和目标库的连接信息
 4. 点击"开始迁移"——完成！
@@ -168,13 +190,13 @@ POST /api/connstr                连接串生成 {ConnectionConfig}
 
 ```bash
 # 1. 下载发布包（x86_64 服务器）
-wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-1.3.0-linux-amd64.zip
+wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-2.0.0-linux-amd64.zip
 
 # ARM64 服务器（鲲鹏/飞腾/Kylin）:
-# wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-1.3.0-linux-arm64.zip
+# wget https://github.com/suoten/dbbridge/releases/latest/download/dbbridge-2.0.0-linux-arm64.zip
 
 # 2. 解压
-unzip dbbridge-1.3.0-linux-amd64.zip
+unzip dbbridge-2.0.0-linux-amd64.zip
 
 # 3. 运行安装脚本
 sudo bash install.sh
@@ -281,11 +303,11 @@ location / {
 如果你是开发者，需要自行打包发布多平台版本，使用 `make-release.ps1` 一键搞定：
 
 ```powershell
-# 默认版本号 1.3.0
+# 默认版本号 2.0.0
 powershell -ExecutionPolicy Bypass -File make-release.ps1
 
 # 指定版本号
-powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 1.2.0
+powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 2.0.0
 ```
 
 脚本会自动完成：
@@ -301,9 +323,9 @@ powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 1.2.0
 产物在 `release/` 目录下：
 ```
 release/
-├── dbbridge-1.3.0-linux-amd64.zip
-├── dbbridge-1.3.0-linux-arm64.zip
-├── dbbridge-1.3.0-windows-amd64.zip
+├── dbbridge-2.0.0-linux-amd64.zip
+├── dbbridge-2.0.0-linux-arm64.zip
+├── dbbridge-2.0.0-windows-amd64.zip
 └── checksums.txt
 ```
 
@@ -570,9 +592,9 @@ xattr -cr /Applications/DBBridge.app
 
 ```bash
 # 正确流程
-wget <download-url>/dbbridge-1.3.0-linux-amd64.zip
-unzip dbbridge-1.3.0-linux-amd64.zip
-cd dbbridge-1.3.0-linux-amd64
+wget <download-url>/dbbridge-2.0.0-linux-amd64.zip
+unzip dbbridge-2.0.0-linux-amd64.zip
+cd dbbridge-2.0.0-linux-amd64
 sudo bash install.sh
 ```
 
@@ -660,7 +682,7 @@ wails dev
 wails build
 
 # 打包多平台发布包（Windows PowerShell）
-powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 0.1.0
+powershell -ExecutionPolicy Bypass -File make-release.ps1 -Version 2.0.0
 ```
 
 ---

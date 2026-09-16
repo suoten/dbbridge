@@ -812,6 +812,9 @@ func (a *Adapter) GetTriggers(ctx context.Context) ([]types.TriggerMeta, error) 
 		}
 		triggers = append(triggers, trigger)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("MSSQL: 遍历触发器失败: %w", err)
+	}
 	return triggers, nil
 }
 
@@ -847,16 +850,19 @@ func (a *Adapter) GetRoutines(ctx context.Context) ([]types.RoutineMeta, error) 
 		}
 		routines = append(routines, routine)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("MSSQL: 遍历存储过程失败: %w", err)
+	}
 	return routines, nil
 }
 
 // GenerateTriggerDDL 将 MSSQL 触发器转换为目标方言的 DDL
 func (a *Adapter) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
 		// MSSQL → MySQL 触发器转换
 		return convertMSSQLTriggerToMySQL(trigger), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return convertMSSQLTriggerToPG(trigger), nil
 	case types.SQLite:
 		return convertMSSQLTriggerToSQLite(trigger), nil
@@ -868,9 +874,9 @@ func (a *Adapter) GenerateTriggerDDL(trigger types.TriggerMeta, targetDialect ty
 // GenerateRoutineDDL 将 MSSQL 存储过程/函数转换为目标方言的 DDL
 func (a *Adapter) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types.DatabaseType) (string, error) {
 	switch targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
 		return convertMSSQLRoutineToMySQL(routine), nil
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return convertMSSQLRoutineToPG(routine), nil
 	default:
 		return "", fmt.Errorf("MSSQL: 不支持的目标方言 %s", targetDialect)
@@ -979,6 +985,40 @@ func (a *Adapter) FixAutoIncrementSequences(ctx context.Context, tableName strin
 // escapeIdent 转义 MSSQL 标识符（方括号内右方括号双写）
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "]", "]]")
+}
+
+// ReadDataByPhysicalRowID 基于 MSSQL %%physloc%% 的物理行游标分页。
+// %%physloc%% 是 MSSQL 内置的物理行定位符（等价于 Oracle ROWID / PG ctid），
+// 返回 varbinary(8)，转为 bigint 做比较。即使无主键也可做 O(1) 游标分页。
+// 返回的每行包含 _physrowid 列，编排器用它推进游标并在写入前移除。
+func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]types.Row, error) {
+	schema, err := a.GetTableSchema(ctx, tableName)
+	if err != nil {
+		return nil, fmt.Errorf("MSSQL: 获取表结构失败: %w", err)
+	}
+	cols := schemaColumnNames(schema)
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("MSSQL: 表 %s 无可读列", tableName)
+	}
+
+	colList := quoteIdentifiers(cols)
+	var query string
+	var args []any
+	if lastRowID != nil {
+		// %%physloc%% 返回 varbinary(8)，转为 bigint 比较
+		query = fmt.Sprintf(
+			"SELECT %s, CONVERT(bigint, %%physloc%%) AS _physrowid FROM [%s] WHERE CONVERT(bigint, %%physloc%%) > @p1 ORDER BY %%physloc%% OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
+			colList, escapeIdent(tableName))
+		args = append(args, lastRowID, limit)
+	} else {
+		query = fmt.Sprintf(
+			"SELECT %s, CONVERT(bigint, %%physloc%%) AS _physrowid FROM [%s] ORDER BY %%physloc%% OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
+			colList, escapeIdent(tableName))
+		args = append(args, limit)
+	}
+
+	allCols := append(append([]string{}, cols...), "_physrowid")
+	return a.scanRows(ctx, query, args, allCols)
 }
 
 // quoteIdentifiers 给列名加方括号

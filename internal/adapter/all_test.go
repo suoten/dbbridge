@@ -14,34 +14,62 @@ import (
 	types "dbbridge/pkg"
 
 	// blank import 触发所有适配器注册（与 app.go 保持一致）
-	_ "dbbridge/internal/adapter/cockroachdb"
-	_ "dbbridge/internal/adapter/dameng"
-	_ "dbbridge/internal/adapter/kingbase"
-	_ "dbbridge/internal/adapter/mariadb"
-	_ "dbbridge/internal/adapter/mssql"
+	// 第一阶段
 	_ "dbbridge/internal/adapter/mysql"
-	_ "dbbridge/internal/adapter/oceanbase"
-	_ "dbbridge/internal/adapter/opengauss"
 	_ "dbbridge/internal/adapter/postgres"
 	_ "dbbridge/internal/adapter/sqlite"
+	_ "dbbridge/internal/adapter/mariadb"
+	_ "dbbridge/internal/adapter/oceanbase"
+	// 第二阶段
 	_ "dbbridge/internal/adapter/tidb"
+	_ "dbbridge/internal/adapter/polardb"
+	_ "dbbridge/internal/adapter/opengauss"
+	_ "dbbridge/internal/adapter/dameng"
+	_ "dbbridge/internal/adapter/kingbase"
+	_ "dbbridge/internal/adapter/aurora"
+	_ "dbbridge/internal/adapter/cockroachdb"
+	// 第三阶段
+	_ "dbbridge/internal/adapter/oracle"
+	_ "dbbridge/internal/adapter/mssql"
+	_ "dbbridge/internal/adapter/db2"
+	_ "dbbridge/internal/adapter/mongodb"
+	_ "dbbridge/internal/adapter/redis"
+	_ "dbbridge/internal/adapter/cassandra"
+	_ "dbbridge/internal/adapter/scylladb"
+	_ "dbbridge/internal/adapter/influxdb"
+	_ "dbbridge/internal/adapter/timescaledb"
+	_ "dbbridge/internal/adapter/tdengine"
 )
 
 // TestAllAdaptersRegistered 验证所有数据库类型都已注册。
 // 如果新增了 DatabaseType 常量但忘记注册适配器，用户选择该类型会静默失败。
 func TestAllAdaptersRegistered(t *testing.T) {
 	expected := []types.DatabaseType{
+		// 第一阶段
 		types.MySQL,
 		types.PostgreSQL,
 		types.SQLite,
 		types.MariaDB,
 		types.OceanBase,
+		// 第二阶段
 		types.TiDB,
+		types.PolarDB,
 		types.OpenGauss,
 		types.Dameng,
 		types.KingbaseES,
+		types.Aurora,
 		types.CockroachDB,
+		// 第三阶段
+		types.Oracle,
 		types.MSSQL,
+		types.Db2,
+		types.MongoDB,
+		types.Redis,
+		types.Cassandra,
+		types.ScyllaDB,
+		types.InfluxDB,
+		types.TimescaleDB,
+		types.TDengine,
 	}
 
 	for _, dbType := range expected {
@@ -67,11 +95,22 @@ func TestAdapterGenerateDDL(t *testing.T) {
 		types.MariaDB,
 		types.OceanBase,
 		types.TiDB,
+		types.PolarDB,
 		types.OpenGauss,
 		types.Dameng,
 		types.KingbaseES,
+		types.Aurora,
 		types.CockroachDB,
+		types.Oracle,
 		types.MSSQL,
+		types.Db2,
+		types.MongoDB,
+		types.Redis,
+		types.Cassandra,
+		types.ScyllaDB,
+		types.InfluxDB,
+		types.TimescaleDB,
+		types.TDengine,
 	}
 
 	// 统一的测试 schema（包含常见类型、主键、自增、默认值、索引、外键、CHECK 约束）
@@ -122,10 +161,15 @@ func TestAdapterGenerateDDL(t *testing.T) {
 				t.Errorf("DDL 未包含表名 test_users: %s", ddl)
 			}
 
-			// DDL 应包含列名
-			for _, col := range schema.Columns {
-				if !strings.Contains(ddl, col.Name) {
-					t.Errorf("DDL 未包含列 %s: %s", col.Name, ddl)
+			// DDL 应包含列名（NoSQL/时序数据库无建表 DDL，跳过列名检查）
+			noSQLTypes := map[types.DatabaseType]bool{
+				types.MongoDB: true, types.Redis: true, types.InfluxDB: true,
+			}
+			if !noSQLTypes[dbType] {
+				for _, col := range schema.Columns {
+					if !strings.Contains(ddl, col.Name) {
+						t.Errorf("DDL 未包含列 %s: %s", col.Name, ddl)
+					}
 				}
 			}
 
@@ -151,11 +195,22 @@ func TestAdapterGetTriggersAndRoutines(t *testing.T) {
 		types.MariaDB,
 		types.OceanBase,
 		types.TiDB,
+		types.PolarDB,
 		types.OpenGauss,
 		types.Dameng,
 		types.KingbaseES,
+		types.Aurora,
 		types.CockroachDB,
+		types.Oracle,
 		types.MSSQL,
+		types.Db2,
+		types.MongoDB,
+		types.Redis,
+		types.Cassandra,
+		types.ScyllaDB,
+		types.InfluxDB,
+		types.TimescaleDB,
+		types.TDengine,
 	}
 
 	for _, dbType := range dbTypes {
