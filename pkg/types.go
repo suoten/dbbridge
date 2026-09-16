@@ -31,6 +31,9 @@ const (
 	InfluxDB    DatabaseType = "influxdb"
 	TimescaleDB DatabaseType = "timescaledb"
 	TDengine    DatabaseType = "tdengine"
+
+	// 第四阶段：桌面/文件型数据库
+	Access DatabaseType = "access"
 )
 
 // ConnectionConfig 数据库连接配置

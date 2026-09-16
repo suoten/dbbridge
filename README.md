@@ -91,8 +91,14 @@ DBBridge 是一款**开源、免费、零依赖**的数据库迁移与 SQL 转�
 | **InfluxDB** | ✅ | ✅ |
 | **TDengine** | ✅ | ✅ |
 
-> 以上 22 种数据库可以**任意两两互转**（N × N 组合）。
+#### 第四阶段：桌面/文件型数据库
+| 数据库 | 作为源库 | 作为目标库 |
+|--------|:--------:|:--------:|
+| **Microsoft Access** (.mdb/.accdb) | ✅ (仅 Windows) | ✅ (仅 Windows) |
+
+> 以上 23 种数据库可以**任意两两互转**（N × N 组合）。
 > NoSQL/时序数据库（MongoDB/Redis/Cassandra/ScyllaDB/InfluxDB/TDengine）通过语义映射实现与关系型数据库的互转。
+> Microsoft Access 仅在 Windows 上可用（需安装 Microsoft Access Database Engine ODBC 驱动），Linux/macOS 用户请先将 .mdb/.accdb 导出为 SQLite 或 MySQL 再迁移。
 
 ### 🛡️ 安全可靠
 - **迁移前自动备份**：目标库的同名表自动重命名为 `_bak_` 前缀

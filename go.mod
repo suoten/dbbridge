@@ -3,6 +3,7 @@ module dbbridge
 go 1.25.0
 
 require (
+	github.com/alexbrainman/odbc v0.0.0-20250601004241-49e6b2bc0cf0
 	github.com/fergusstrange/embedded-postgres v1.34.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/gocql/gocql v1.7.0

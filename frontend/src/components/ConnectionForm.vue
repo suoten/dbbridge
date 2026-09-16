@@ -68,9 +68,13 @@ const dbTypes = [
   { value: 'scylladb', label: 'ScyllaDB', icon: Database, group: '商业/NoSQL', experimental: true },
   { value: 'influxdb', label: 'InfluxDB', icon: Database, group: '商业/NoSQL', experimental: true },
   { value: 'tdengine', label: 'TDengine', icon: Database, group: '商业/NoSQL', experimental: true },
+  // 第四阶段：桌面/文件型数据库
+  { value: 'access', label: 'Microsoft Access', icon: HardDrive, group: '桌面/文件型', experimental: true },
 ]
 
 const isSQLite = computed(() => props.modelValue.type === 'sqlite')
+const isAccess = computed(() => props.modelValue.type === 'access')
+const isFileDB = computed(() => isSQLite.value || isAccess.value)
 const isMSSQL = computed(() => props.modelValue.type === 'mssql')
 const isPostgresLike = computed(() => ['postgres', 'opengauss', 'kingbase', 'cockroachdb', 'timescaledb'].includes(props.modelValue.type))
 const isPostgres = isPostgresLike
@@ -114,6 +118,9 @@ function update(field: keyof ConnectionConfig, value: any) {
       newConfig.port = 8086
     } else if (value === 'tdengine') {
       newConfig.port = 6030
+    } else if (value === 'access') {
+      // Access 是文件型数据库，不需要端口
+      newConfig.port = 0
     } else if (value === 'polardb') {
       newConfig.port = 3306
     } else if (value === 'aurora') {
@@ -197,7 +204,7 @@ async function handleTest() {
         </div>
       </div>
 
-      <template v-if="!isSQLite">
+      <template v-if="!isFileDB">
         <!-- Host & Port -->
         <div class="form-row">
           <div class="form-group flex-grow-2">
@@ -293,7 +300,7 @@ async function handleTest() {
       </template>
 
       <!-- SQLite: file path -->
-      <template v-else>
+      <template v-else-if="isSQLite">
         <div class="form-row">
           <div class="form-group">
             <label class="label">
@@ -306,6 +313,56 @@ async function handleTest() {
               :value="modelValue.database"
               @input="update('database', ($event.target as HTMLInputElement).value)"
               placeholder="/path/to/database.db 或 :memory:"
+              :disabled="disabled"
+            />
+          </div>
+        </div>
+      </template>
+
+      <!-- Access: file path -->
+      <template v-else>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="label">
+              <FileText :size="12" />
+              Access 文件路径
+            </label>
+            <input
+              class="input"
+              type="text"
+              :value="modelValue.database"
+              @input="update('database', ($event.target as HTMLInputElement).value)"
+              placeholder="C:\\data\\mydb.accdb 或 .mdb"
+              :disabled="disabled"
+            />
+          </div>
+        </div>
+        <!-- Access 可选用户名密码（数据库级密码保护） -->
+        <div class="form-row">
+          <div class="form-group">
+            <label class="label">
+              <User :size="12" />
+              用户名（可选）
+            </label>
+            <input
+              class="input"
+              type="text"
+              :value="modelValue.username"
+              @input="update('username', ($event.target as HTMLInputElement).value)"
+              placeholder="Admin"
+              :disabled="disabled"
+            />
+          </div>
+          <div class="form-group">
+            <label class="label">
+              <KeyRound :size="12" />
+              密码（可选）
+            </label>
+            <input
+              class="input"
+              type="password"
+              :value="modelValue.password"
+              @input="update('password', ($event.target as HTMLInputElement).value)"
               :disabled="disabled"
             />
           </div>

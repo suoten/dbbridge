@@ -31,6 +31,8 @@ import (
 	_ "dbbridge/internal/adapter/influxdb"
 	_ "dbbridge/internal/adapter/timescaledb"
 	_ "dbbridge/internal/adapter/tdengine"
+	// 第四阶段：桌面/文件型数据库
+	_ "dbbridge/internal/adapter/access"
 	"dbbridge/internal/history"
 	"dbbridge/internal/service"
 	"dbbridge/internal/sqllint"

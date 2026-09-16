@@ -115,6 +115,19 @@ var kindAliases = map[string]Kind{
 	"XML":              KindText,
 	"ROWVERSION":       KindBinary,
 	"GUID":             KindUUID,
+
+	// Access (Jet/ACE) 专有类型
+	"COUNTER":         KindInt,       // Access 自增整型（等同于 AUTOINCREMENT / IDENTITY）
+	"AUTOINCREMENT":   KindInt,       // Access 自增整型别名
+	"IDENTITY":        KindInt,       // Access 自增整型别名
+	"YESNO":           KindBool,      // Access 是/否类型
+	"BYTE":            KindTinyInt,   // Access 字节类型
+	"MEMO":            KindText,      // Access 备注字段
+	"LONGCHAR":        KindText,      // Access 备注字段别名
+	"SINGLE":          KindFloat,     // Access 单精度
+	"CURRENCY":        KindDecimal,   // Access 货币类型
+	"OLEOBJECT":       KindBlob,      // Access OLE 对象字段
+	"LONGBINARY":      KindBlob,      // Access 长二进制
 }
 
 // Normalize 将源方言的基础类型名归一化为中立类型。
@@ -632,6 +645,51 @@ func ToInfluxDB(k Kind, col types.ColumnMeta) string {
 		return "STRING"
 	default:
 		return "STRING"
+	}
+}
+
+// ToAccess 中立类型 → Microsoft Access (Jet/ACE) 类型
+//
+// Access 的类型系统较简单，只有少量原生类型：
+// SHORT (Integer)、LONG (Long Integer)、SINGLE、DOUBLE、CURRENCY、
+// TEXT/SHORTTEXT (VARCHAR)、LONGTEXT/MEMO、DATETIME、YESNO、OLEOBJECT
+// AUTOINCREMENT 用于自增主键。
+func ToAccess(k Kind, col types.ColumnMeta) string {
+	switch k {
+	case KindTinyInt, KindSmallInt, KindYear:
+		return "SHORT"
+	case KindInt:
+		if col.AutoIncrement {
+			return "AUTOINCREMENT"
+		}
+		return "LONG"
+	case KindBigInt:
+		// Access 没有 64 位整数，用 DOUBLE 近似（精度 15 位，够大部分场景）
+		return "DOUBLE"
+	case KindDecimal:
+		return "CURRENCY"
+	case KindFloat:
+		return "SINGLE"
+	case KindDouble:
+		return "DOUBLE"
+	case KindBool, KindBit:
+		return "YESNO"
+	case KindChar:
+		return toSize("VARCHAR", col.Length, 50)
+	case KindVarChar:
+		return toSize("VARCHAR", col.Length, 255)
+	case KindText, KindJSON:
+		return "LONGTEXT"
+	case KindBlob, KindBinary:
+		return "OLEOBJECT"
+	case KindDate, KindTime, KindDateTime, KindTimestamp:
+		return "DATETIME"
+	case KindUUID:
+		return "VARCHAR(38)"
+	case KindEnum, KindSet:
+		return "VARCHAR(255)"
+	default:
+		return "VARCHAR(255)"
 	}
 }
 
