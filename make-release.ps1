@@ -122,11 +122,14 @@ $buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
 $wailsExe = "build/bin/DBBridge.exe"
 if ($buildExit -ne 0 -or -not (Test-Path $wailsExe)) {
     # 回退到 go build（需要用户机器有 WebView2 运行时）
+    # 注意：go build 缓存不会检测 //go:embed 内容变化，必须加 -a 强制重编译
     Write-Host "  wails build failed, falling back to go build..." -ForegroundColor Yellow
     $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
     $out = "$distDir/dbbridge-windows-amd64.exe"
+    # 删除旧产物，确保不残留
+    if (Test-Path $out) { Remove-Item $out -Force }
     $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & go build -ldflags="$ldflags" -o $out . 2>&1 | Out-Null
+    & go build -a -ldflags="$ldflags" -o $out . 2>&1 | Out-Null
     $buildExit = $LASTEXITCODE; $ErrorActionPreference = $prevEAP
     $env:GOOS = ""; $env:GOARCH = ""; $env:CGO_ENABLED = ""
     if ($buildExit -ne 0 -or -not (Test-Path $out)) { Write-Host "ERROR: Build failed for windows-amd64 (exit $buildExit)" -ForegroundColor Red; exit 1 }
