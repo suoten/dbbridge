@@ -987,6 +987,12 @@ func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "]", "]]")
 }
 
+// mssqlPhysLoc MSSQL 物理行定位符。
+// 注意：该伪列的字面写法就是双百分号 %%physloc%%，若放在 fmt.Sprintf
+// 的格式串里会被 %% 转义吃掉一半变成单百分号（SQL Server 报 syntax error 102）。
+// 因此必须通过 %s 参数传入，绝不能直接写在格式串里。
+const mssqlPhysLoc = "%%physloc%%"
+
 // ReadDataByPhysicalRowID 基于 MSSQL %%physloc%% 的物理行游标分页。
 // %%physloc%% 是 MSSQL 内置的物理行定位符（等价于 Oracle ROWID / PG ctid），
 // 返回 varbinary(8)，转为 bigint 做比较。即使无主键也可做 O(1) 游标分页。
@@ -1002,18 +1008,11 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 	}
 
 	colList := quoteIdentifiers(cols)
-	var query string
+	query := buildPhysicalRowIDQuery(colList, escapeIdent(tableName), lastRowID != nil)
 	var args []any
 	if lastRowID != nil {
-		// %%physloc%% 返回 varbinary(8)，转为 bigint 比较
-		query = fmt.Sprintf(
-			"SELECT %s, CONVERT(bigint, %%physloc%%) AS _physrowid FROM [%s] WHERE CONVERT(bigint, %%physloc%%) > @p1 ORDER BY %%physloc%% OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
-			colList, escapeIdent(tableName))
 		args = append(args, lastRowID, limit)
 	} else {
-		query = fmt.Sprintf(
-			"SELECT %s, CONVERT(bigint, %%physloc%%) AS _physrowid FROM [%s] ORDER BY %%physloc%% OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
-			colList, escapeIdent(tableName))
 		args = append(args, limit)
 	}
 
@@ -1028,4 +1027,17 @@ func quoteIdentifiers(cols []string) string {
 		quoted[i] = fmt.Sprintf("[%s]", escapeIdent(c))
 	}
 	return strings.Join(quoted, ", ")
+}
+
+// buildPhysicalRowIDQuery 构建物理行游标分页查询（纯函数，便于单测防回归）。
+// 首批（无 lastRowID）用 @p1 占位 limit，续批用 @p1 比较 @p2 占位 limit。
+func buildPhysicalRowIDQuery(colList, escapedTable string, hasLastRowID bool) string {
+	if hasLastRowID {
+		return fmt.Sprintf(
+			"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] WHERE CONVERT(bigint, %s) > @p1 ORDER BY %s OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
+			colList, mssqlPhysLoc, escapedTable, mssqlPhysLoc, mssqlPhysLoc)
+	}
+	return fmt.Sprintf(
+		"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] ORDER BY %s OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
+		colList, mssqlPhysLoc, escapedTable, mssqlPhysLoc)
 }
