@@ -222,13 +222,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
-	var config types.ConnectionConfig
-	if !decodeBody(w, r, &config) {
+	// 请求体为 {"config": {...}}（与 /api/backups/restore、/api/backups/delete 一致，
+	// 也与 README API 文档和 Web 模式桥接 shim 的约定一致）
+	var req struct {
+		Config types.ConnectionConfig `json:"config"`
+	}
+	if !decodeBody(w, r, &req) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	backups, err := s.backup.GetBackupTables(ctx, config)
+	backups, err := s.backup.GetBackupTables(ctx, req.Config)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
