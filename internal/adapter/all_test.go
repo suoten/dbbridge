@@ -15,30 +15,30 @@ import (
 
 	// blank import 触发所有适配器注册（与 app.go 保持一致）
 	// 第一阶段
+	_ "dbbridge/internal/adapter/mariadb"
 	_ "dbbridge/internal/adapter/mysql"
+	_ "dbbridge/internal/adapter/oceanbase"
 	_ "dbbridge/internal/adapter/postgres"
 	_ "dbbridge/internal/adapter/sqlite"
-	_ "dbbridge/internal/adapter/mariadb"
-	_ "dbbridge/internal/adapter/oceanbase"
 	// 第二阶段
-	_ "dbbridge/internal/adapter/tidb"
-	_ "dbbridge/internal/adapter/polardb"
-	_ "dbbridge/internal/adapter/opengauss"
-	_ "dbbridge/internal/adapter/dameng"
-	_ "dbbridge/internal/adapter/kingbase"
 	_ "dbbridge/internal/adapter/aurora"
 	_ "dbbridge/internal/adapter/cockroachdb"
+	_ "dbbridge/internal/adapter/dameng"
+	_ "dbbridge/internal/adapter/kingbase"
+	_ "dbbridge/internal/adapter/opengauss"
+	_ "dbbridge/internal/adapter/polardb"
+	_ "dbbridge/internal/adapter/tidb"
 	// 第三阶段
-	_ "dbbridge/internal/adapter/oracle"
-	_ "dbbridge/internal/adapter/mssql"
-	_ "dbbridge/internal/adapter/db2"
-	_ "dbbridge/internal/adapter/mongodb"
-	_ "dbbridge/internal/adapter/redis"
 	_ "dbbridge/internal/adapter/cassandra"
-	_ "dbbridge/internal/adapter/scylladb"
+	_ "dbbridge/internal/adapter/db2"
 	_ "dbbridge/internal/adapter/influxdb"
-	_ "dbbridge/internal/adapter/timescaledb"
+	_ "dbbridge/internal/adapter/mongodb"
+	_ "dbbridge/internal/adapter/mssql"
+	_ "dbbridge/internal/adapter/oracle"
+	_ "dbbridge/internal/adapter/redis"
+	_ "dbbridge/internal/adapter/scylladb"
 	_ "dbbridge/internal/adapter/tdengine"
+	_ "dbbridge/internal/adapter/timescaledb"
 )
 
 // TestAllAdaptersRegistered 验证所有数据库类型都已注册。
@@ -156,8 +156,8 @@ func TestAdapterGenerateDDL(t *testing.T) {
 				t.Error("GenerateCreateTableDDL 返回空 DDL")
 			}
 
-			// DDL 应包含表名
-			if !strings.Contains(ddl, "test_users") {
+			// DDL 应包含表名（Oracle 等数据库会规范化为大写，用大小写无关比较）
+			if !strings.Contains(strings.ToUpper(ddl), strings.ToUpper("test_users")) {
 				t.Errorf("DDL 未包含表名 test_users: %s", ddl)
 			}
 
@@ -167,7 +167,7 @@ func TestAdapterGenerateDDL(t *testing.T) {
 			}
 			if !noSQLTypes[dbType] {
 				for _, col := range schema.Columns {
-					if !strings.Contains(ddl, col.Name) {
+					if !strings.Contains(strings.ToUpper(ddl), strings.ToUpper(col.Name)) {
 						t.Errorf("DDL 未包含列 %s: %s", col.Name, ddl)
 					}
 				}

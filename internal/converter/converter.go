@@ -460,6 +460,17 @@ func parseColumnDef(def string, dialect types.DatabaseType) *types.ColumnMeta {
 		col.AutoIncrement = true
 	}
 
+	// 列级 PRIMARY KEY（MySQL 允许写在列定义内，
+	// 如 `id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY COMMENT 'xx'`）。
+	// 先截掉 COMMENT 段，防止注释文案里出现 "primary key" 误判。
+	scanPart := upperDef
+	if cIdx := strings.Index(scanPart, "COMMENT"); cIdx >= 0 {
+		scanPart = scanPart[:cIdx]
+	}
+	if strings.Contains(scanPart, "PRIMARY KEY") {
+		col.IsPrimaryKey = true
+	}
+
 	// DEFAULT
 	if idx := strings.Index(upperDef, "DEFAULT"); idx >= 0 {
 		rest := strings.TrimSpace(def[idx+7:])

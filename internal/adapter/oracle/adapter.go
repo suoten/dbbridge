@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -187,7 +188,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 // GetRowCount 获取表的行数
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(tableName))).Scan(&count)
+	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, oraIdent(tableName))).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("Oracle: 获取行数失败: %w", err)
 	}
@@ -209,7 +210,7 @@ func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, erro
 // BackupTable 将表重命名为备份表名
 func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
 	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME "%s" TO "%s"`, escapeIdent(tableName), escapeIdent(backupName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME %s TO %s`, oraIdent(tableName), oraIdent(backupName)))
 	if err != nil {
 		return "", fmt.Errorf("Oracle: 备份表失败: %w", err)
 	}
@@ -220,12 +221,12 @@ func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, er
 func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE "%s" PURGE`, escapeIdent(originalName)))
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s PURGE`, oraIdent(originalName)))
 		if err != nil {
 			return fmt.Errorf("Oracle: 恢复备份时删除当前表失败: %w", err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME "%s" TO "%s"`, escapeIdent(backupName), escapeIdent(originalName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME %s TO %s`, oraIdent(backupName), oraIdent(originalName)))
 	if err != nil {
 		return fmt.Errorf("Oracle: 恢复备份失败: %w", err)
 	}
@@ -234,7 +235,7 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 
 // DropBackup 删除备份表
 func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE "%s" PURGE`, escapeIdent(backupName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s PURGE`, oraIdent(backupName)))
 	if err != nil {
 		return fmt.Errorf("Oracle: 删除备份表失败: %w", err)
 	}
@@ -244,15 +245,15 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 // GenerateCreateTableDDL 生成建表 SQL
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`CREATE TABLE "%s" (
-`, escapeIdent(table.Name)))
+	sb.WriteString(fmt.Sprintf(`CREATE TABLE %s (
+`, oraIdent(table.Name)))
 
 	for i, col := range table.Columns {
 		if i > 0 {
 			sb.WriteString(",\n")
 		}
 		sb.WriteString("  ")
-		sb.WriteString(fmt.Sprintf(`"%s" `, escapeIdent(col.Name)))
+		sb.WriteString(fmt.Sprintf(`%s `, oraIdent(col.Name)))
 		sb.WriteString(a.MapType(col))
 		if !col.Nullable {
 			sb.WriteString(" NOT NULL")
@@ -285,7 +286,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString(fmt.Sprintf(`"%s"`, escapeIdent(c)))
+			sb.WriteString(fmt.Sprintf(`%s`, oraIdent(c)))
 		}
 		sb.WriteString(")")
 	}
@@ -296,7 +297,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf(`DROP TABLE "%s" PURGE`, escapeIdent(tableName)), nil
+	return fmt.Sprintf(`DROP TABLE %s PURGE`, oraIdent(tableName)), nil
 }
 
 // ReadData 按偏移量分页读取数据
@@ -315,14 +316,14 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 	// 构造最外层 SELECT 的列列表（显式列出，排除 rn）
 	outerCols := make([]string, len(cols))
 	for i, c := range cols {
-		outerCols[i] = fmt.Sprintf(`"%s"`, escapeIdent(c))
+		outerCols[i] = fmt.Sprintf(`%s`, oraIdent(c))
 	}
 	query := fmt.Sprintf(`SELECT %s FROM (
 		SELECT t.*, ROWNUM rn FROM (
-			SELECT * FROM "%s" ORDER BY 1
+			SELECT * FROM %s ORDER BY 1
 		) t WHERE ROWNUM <= %d
 	) WHERE rn > %d`,
-		strings.Join(outerCols, ", "), escapeIdent(tableName), offset+limit, offset)
+		strings.Join(outerCols, ", "), oraIdent(tableName), offset+limit, offset)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -339,13 +340,13 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 	var args []any
 	if lastKey != nil {
 		query = fmt.Sprintf(`SELECT * FROM (
-			SELECT * FROM "%s" WHERE "%s" > :1 ORDER BY "%s" ASC
-		) WHERE ROWNUM <= %d`, escapeIdent(tableName), escapeIdent(keyColumn), escapeIdent(keyColumn), limit)
+			SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC
+		) WHERE ROWNUM <= %d`, oraIdent(tableName), oraIdent(keyColumn), oraIdent(keyColumn), limit)
 		args = append(args, lastKey)
 	} else {
 		query = fmt.Sprintf(`SELECT * FROM (
-			SELECT * FROM "%s" ORDER BY "%s" ASC
-		) WHERE ROWNUM <= %d`, escapeIdent(tableName), escapeIdent(keyColumn), limit)
+			SELECT * FROM %s ORDER BY %s ASC
+		) WHERE ROWNUM <= %d`, oraIdent(tableName), oraIdent(keyColumn), limit)
 	}
 	return a.scanRows(ctx, query, args, cols)
 }
@@ -359,8 +360,8 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	for i := range columns {
 		placeholders[i] = fmt.Sprintf(":%d", i+1)
 	}
-	query := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s)`,
-		escapeIdent(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
+	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
+		oraIdent(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -488,19 +489,19 @@ func (a *Adapter) FixAutoIncrementSequences(ctx context.Context, tableName strin
 			continue
 		}
 		seqName := strings.ToUpper(tableName) + "_SEQ"
-		query := fmt.Sprintf(`SELECT "%s".NEXTVAL FROM DUAL`, escapeIdent(seqName))
+		query := fmt.Sprintf(`SELECT %s.NEXTVAL FROM DUAL`, oraIdent(seqName))
 		var curVal int64
 		if err := a.db.QueryRowContext(ctx, query).Scan(&curVal); err != nil {
 			continue
 		}
-		maxQuery := fmt.Sprintf(`SELECT COALESCE(MAX("%s"), 0) FROM "%s"`, escapeIdent(col.Name), escapeIdent(tableName))
+		maxQuery := fmt.Sprintf(`SELECT COALESCE(MAX(%s), 0) FROM %s`, oraIdent(col.Name), oraIdent(tableName))
 		var maxVal int64
 		if err := a.db.QueryRowContext(ctx, maxQuery).Scan(&maxVal); err != nil {
 			continue
 		}
 		if maxVal > 0 {
-	a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE "%s" INCREMENT BY 1 MINVALUE 0`, escapeIdent(seqName)))
-	a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE "%s" RESTART START WITH %d`, escapeIdent(seqName), maxVal+1))
+	a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE %s INCREMENT BY 1 MINVALUE 0`, oraIdent(seqName)))
+		a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE %s RESTART START WITH %d`, oraIdent(seqName), maxVal+1))
 		}
 	}
 	return nil
@@ -546,7 +547,7 @@ func schemaColumnNames(schema types.TableSchema) []string {
 func quoteIdentifiers(cols []string) string {
 	quoted := make([]string, len(cols))
 	for i, c := range cols {
-		quoted[i] = fmt.Sprintf(`"%s"`, escapeIdent(c))
+		quoted[i] = oraIdent(c)
 	}
 	return strings.Join(quoted, ", ")
 }
@@ -554,6 +555,52 @@ func quoteIdentifiers(cols []string) string {
 // escapeIdent 转义 Oracle 标识符中的双引号，防止 SQL 注入和语法错误
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, `"`, `""`)
+}
+
+// safeIdentRe 匹配无需引号即可安全使用的 Oracle 标识符
+var safeIdentRe = regexp.MustCompile(`^[A-Z][A-Z0-9_$#]*$`)
+
+// oracleReservedWords Oracle 保留字（经典集）。保留字裸写做列名/表名会报
+// ORA-00904/ORA-00971 等，带引号则允许（如 "LEVEL"），因此命中时保持引号。
+var oracleReservedWords = map[string]bool{
+	"ACCESS": true, "ADD": true, "ALL": true, "ALTER": true, "AND": true, "ANY": true,
+	"AS": true, "ASC": true, "AUDIT": true, "BETWEEN": true, "BY": true, "CHAR": true,
+	"CHECK": true, "CLUSTER": true, "COLUMN": true, "COMMENT": true, "COMPRESS": true,
+	"CONNECT": true, "CREATE": true, "CURRENT": true, "DATE": true, "DECIMAL": true,
+	"DEFAULT": true, "DELETE": true, "DESC": true, "DISTINCT": true, "DROP": true,
+	"ELSE": true, "EXCLUSIVE": true, "EXISTS": true, "FILE": true, "FLOAT": true,
+	"FOR": true, "FROM": true, "GRANT": true, "GROUP": true, "HAVING": true,
+	"IDENTIFIED": true, "IMMEDIATE": true, "IN": true, "INCREMENT": true, "INDEX": true,
+	"INITIAL": true, "INSERT": true, "INTEGER": true, "INTERSECT": true, "INTO": true,
+	"IS": true, "LEVEL": true, "LIKE": true, "LOCK": true, "LONG": true, "MAXEXTENTS": true,
+	"MINUS": true, "MLSLABEL": true, "MODE": true, "MODIFY": true, "NOAUDIT": true,
+	"NOCOMPRESS": true, "NOT": true, "NOWAIT": true, "NULL": true, "NUMBER": true,
+	"OF": true, "OFFLINE": true, "ON": true, "ONLINE": true, "OPTION": true, "OR": true,
+	"ORDER": true, "PCTFREE": true, "PRIOR": true, "PUBLIC": true, "RAW": true,
+	"RENAME": true, "RESOURCE": true, "REVOKE": true, "ROW": true, "ROWID": true,
+	"ROWNUM": true, "ROWS": true, "SELECT": true, "SESSION": true, "SET": true,
+	"SHARE": true, "SIZE": true, "SMALLINT": true, "START": true, "SUCCESSFUL": true,
+	"SYNONYM": true, "SYSDATE": true, "TABLE": true, "THEN": true, "TO": true,
+	"TRIGGER": true, "UID": true, "UNION": true, "UNIQUE": true, "UPDATE": true,
+	"USER": true, "VALIDATE": true, "VALUES": true, "VARCHAR": true, "VARCHAR2": true,
+	"VIEW": true, "WHENEVER": true, "WHERE": true, "WITH": true,
+}
+
+// oraIdent 将标识符规范化为 Oracle 惯例（大写，安全时不加引号）。
+//
+// 此前所有 DDL/查询都输出带双引号的原始大小写标识符（如 "customers"），
+// Oracle 会按字面小写存储，而存在性判断（USER_TABLES 里 UPPER(:1)）
+// 和后续读写用的都是大写预期，两边对不上：第二次迁移时 TableExists 误判
+// 为不存在，不执行 DROP 直接 CREATE，报 ORA-00955 name is already used，
+// 建表失败且报错里的 SQL 被截断难定位。
+// 统一规范化为大写后，存储/判断/读写三处一致。
+// 保留字（如 LEVEL、ORDER、COMMENT）带引号使用是合法的，命中时保持引号。
+func oraIdent(name string) string {
+	upper := strings.ToUpper(name)
+	if safeIdentRe.MatchString(upper) && !oracleReservedWords[upper] {
+		return upper
+	}
+	return `"` + escapeIdent(upper) + `"`
 }
 
 // ReadDataByPhysicalRowID 基于 Oracle ROWID 的物理行游标分页。
@@ -571,21 +618,21 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 
 	outerCols := make([]string, len(cols))
 	for i, c := range cols {
-		outerCols[i] = fmt.Sprintf(`"%s"`, escapeIdent(c))
+		outerCols[i] = fmt.Sprintf(`%s`, oraIdent(c))
 	}
 	var query string
 	var args []any
 	if lastRowID != nil {
 		query = fmt.Sprintf(`SELECT %s, ROWIDTOCHAR(rowid) AS _physrowid FROM (
-			SELECT * FROM "%s" WHERE ROWID > CHARTOROWID(:1) ORDER BY ROWID
+			SELECT * FROM %s WHERE ROWID > CHARTOROWID(:1) ORDER BY ROWID
 		) WHERE ROWNUM <= %d`,
-			strings.Join(outerCols, ", "), escapeIdent(tableName), limit)
+			strings.Join(outerCols, ", "), oraIdent(tableName), limit)
 		args = append(args, lastRowID)
 	} else {
 		query = fmt.Sprintf(`SELECT %s, ROWIDTOCHAR(rowid) AS _physrowid FROM (
-			SELECT * FROM "%s" ORDER BY ROWID
+			SELECT * FROM %s ORDER BY ROWID
 		) WHERE ROWNUM <= %d`,
-			strings.Join(outerCols, ", "), escapeIdent(tableName), limit)
+			strings.Join(outerCols, ", "), oraIdent(tableName), limit)
 	}
 
 	allCols := append(append([]string{}, cols...), "_physrowid")

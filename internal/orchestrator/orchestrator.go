@@ -500,7 +500,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 				continue
 			}
 			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
-				return 0, fmt.Errorf("执行建表SQL失败: %w (SQL: %s)", err, truncate(stmt, 120))
+				return 0, fmt.Errorf("执行建表SQL失败: %w (SQL: %s)", err, truncate(stmt, 500))
 			}
 		}
 		o.log("INFO", tableName, "表结构创建完成")
