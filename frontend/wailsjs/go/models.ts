@@ -328,6 +328,9 @@ export namespace main {
 	    autoRollback: boolean;
 	    migrateTriggers: boolean;
 	    migrateRoutines: boolean;
+	    schemaDefault?: string;
+	    schemaTables?: Record<string, string>;
+	    tablespace?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new StartMigrationRequest(source);
@@ -348,6 +351,9 @@ export namespace main {
 	        this.autoRollback = source["autoRollback"];
 	        this.migrateTriggers = source["migrateTriggers"];
 	        this.migrateRoutines = source["migrateRoutines"];
+	        this.schemaDefault = source["schemaDefault"];
+	        this.schemaTables = source["schemaTables"];
+	        this.tablespace = source["tablespace"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

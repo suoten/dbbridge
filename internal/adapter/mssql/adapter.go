@@ -161,6 +161,9 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 	schema := types.TableSchema{
 		Name: tableName,
 	}
+	// 支持限定名：schema 感知查询。注意 OBJECT_ID/QUOTENAME 逐段拼接，
+	// 不能用 'dbo.' + name（限定名下既查不到也错报 identity）
+	schemaName, table := types.SplitQualified(tableName)
 
 	// 获取表注释
 	var tableComment sql.NullString
@@ -168,8 +171,8 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		SELECT CAST(ep.value AS NVARCHAR(MAX))
 		FROM sys.tables st
 		JOIN sys.extended_properties ep ON ep.major_id = st.object_id AND ep.minor_id = 0 AND ep.name = 'MS_Description'
-		WHERE st.name = @p1
-	`, tableName).Scan(&tableComment)
+		WHERE st.name = @p2 AND SCHEMA_NAME(st.schema_id) = COALESCE(NULLIF(@p1, ''), 'dbo')
+	`, schemaName, table).Scan(&tableComment)
 	if err == nil && tableComment.Valid {
 		schema.Comment = tableComment.String
 	}
@@ -179,14 +182,14 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT,
 		       c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
 		       c.ORDINAL_POSITION,
-		       COLUMNPROPERTY(OBJECT_ID('dbo.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsIdentity') as is_identity,
+		       COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity') as is_identity,
 		       CAST(ep.value AS NVARCHAR(MAX)) as comment
 		FROM INFORMATION_SCHEMA.COLUMNS c
-		LEFT JOIN sys.columns sc ON sc.object_id = OBJECT_ID('dbo.' + c.TABLE_NAME) AND sc.name = c.COLUMN_NAME
+		LEFT JOIN sys.columns sc ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) AND sc.name = c.COLUMN_NAME
 		LEFT JOIN sys.extended_properties ep ON ep.major_id = sc.object_id AND ep.minor_id = sc.column_id AND ep.name = 'MS_Description'
-		WHERE c.TABLE_SCHEMA = 'dbo' AND c.TABLE_NAME = @p1
+		WHERE c.TABLE_SCHEMA = COALESCE(NULLIF(@p2, ''), 'dbo') AND c.TABLE_NAME = @p1
 		ORDER BY c.ORDINAL_POSITION
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("MSSQL: 查询列信息失败: %w", err)
 	}
@@ -267,11 +270,11 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
 			ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
 			AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
-		WHERE tc.TABLE_SCHEMA = 'dbo'
+		WHERE tc.TABLE_SCHEMA = COALESCE(NULLIF(@p2, ''), 'dbo')
 		AND tc.TABLE_NAME = @p1
 		AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
 		ORDER BY kcu.ORDINAL_POSITION
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("MSSQL: 查询主键信息失败: %w", err)
 	}
@@ -315,9 +318,10 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		           FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') AS columns
 		FROM sys.indexes i
 		JOIN sys.tables t ON t.object_id = i.object_id
-		WHERE t.name = @p1 AND i.type > 0 AND i.is_primary_key = 0
+		JOIN sys.schemas s ON s.schema_id = t.schema_id
+		WHERE t.name = @p1 AND s.name = COALESCE(NULLIF(@p2, ''), 'dbo') AND i.type > 0 AND i.is_primary_key = 0
 		ORDER BY i.name
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("MSSQL: 查询索引信息失败: %w", err)
 	}
@@ -364,10 +368,11 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		       fk.update_referential_action_desc
 		FROM sys.foreign_keys fk
 		JOIN sys.tables t ON t.object_id = fk.parent_object_id
+		JOIN sys.schemas s ON s.schema_id = t.schema_id
 		JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
-		WHERE t.name = @p1
+		WHERE t.name = @p1 AND s.name = COALESCE(NULLIF(@p2, ''), 'dbo')
 		ORDER BY fk.name
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("MSSQL: 查询外键信息失败: %w", err)
 	}
@@ -513,9 +518,11 @@ func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, er
 	if schemaName != "" {
 		qualifiedBackup = schemaName + "." + backupName
 	}
-	// sp_rename 参数是字符串字面量，内层用方括号包裹标识符（escapeIdent 已双写 ]）
+	// sp_rename 参数是字符串字面量，内层用方括号包裹标识符（escapeIdent 已双写 ]）。
+	// 注意必须用 bracketQualified 逐段限定：'[ods].[orders]' 是 schema 限定，
+	// 而 '[ods.orders]' 是带点号的单个标识符，会静默找不到对象或改错对象。
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(tableName), escapeIdent(backupName)))
+		fmt.Sprintf("EXEC sp_rename '%s', '[%s]'", bracketQualified(tableName), escapeIdent(backupName)))
 	if err != nil {
 		return "", fmt.Errorf("MSSQL: 备份表失败 (%s→%s): %w", tableName, qualifiedBackup, err)
 	}
@@ -533,17 +540,17 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 		}
 	}
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(backupName), escapeIdent(qualifyBare(originalName))))
+		fmt.Sprintf("EXEC sp_rename '%s', '[%s]'", bracketQualified(backupName), escapeIdent(qualifyBare(originalName))))
 	if err != nil {
 		return fmt.Errorf("MSSQL: 恢复备份失败 (%s→%s): %w", backupName, originalName, err)
 	}
 	return nil
 }
 
-// DropBackup 删除备份表
+// DropBackup 删除备份表（qualifyTable 逐段限定，兼容带 Schema 的备份表名）
 func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("DROP TABLE IF EXISTS [%s]", escapeIdent(backupName)))
+		fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyTable(backupName)))
 	if err != nil {
 		return fmt.Errorf("MSSQL: 删除备份表失败: %w", err)
 	}

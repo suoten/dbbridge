@@ -199,12 +199,15 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 	schemaName, table := types.SplitQualified(tableName)
 	schemaFilter := "table_schema = COALESCE(NULLIF($2, ''), 'public')"
 
-	// 获取表注释
+	// 获取表注释（限定名需逐段拼出 regclass 引用；未配置 schema 时走 search_path）
 	if !a.noComments {
 		var comment sql.NullString
-		err := a.db.QueryRowContext(ctx, `
-			SELECT obj_description(quote_ident($1)::regclass, 'pg_class')
-		`, tableName).Scan(&comment)
+		ref := `"` + escapeIdent(table) + `"`
+		if schemaName != "" {
+			ref = `"` + escapeIdent(schemaName) + `".` + ref
+		}
+		err := a.db.QueryRowContext(ctx,
+			`SELECT obj_description(`+ref+`::regclass, 'pg_class')`).Scan(&comment)
 		if err == nil && comment.Valid {
 			schema.Comment = comment.String
 		}
@@ -454,7 +457,9 @@ func (a *Base) BackupTable(ctx context.Context, tableName string) (string, error
 	return qualifiedBackup, nil
 }
 
-// RestoreFromBackup 从备份表恢复（删除当前同名表，将备份表重命名回去）
+// RestoreFromBackup 从备份表恢复（删除当前同名表，将备份表重命名回原表名）。
+// 注意：RENAME TO 目标侧不能带 schema（PG 语法限制），
+// 重命名后留在备份表所在 schema（与原表同 schema，语义正确）
 func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
@@ -465,8 +470,9 @@ func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName s
 			return fmt.Errorf("%s: 恢复备份时删除当前表失败（可能存在依赖视图/外键，请先处理依赖）: %w", a.brand(), err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`,
-		qualifyTable(backupName), qualifyTable(originalName)))
+	_, bare := types.SplitQualified(originalName)
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
+		qualifyTable(backupName), escapeIdent(bare)))
 	if err != nil {
 		return fmt.Errorf("%s: 恢复备份失败 (%s→%s): %w", a.brand(), backupName, originalName, err)
 	}

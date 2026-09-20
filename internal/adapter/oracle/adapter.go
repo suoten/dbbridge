@@ -42,6 +42,12 @@ func qualifyTable(name string) string {
 	return oraIdent(schema) + "." + oraIdent(table)
 }
 
+// qualifyBare 取限定名的裸表部分（供 RENAME 目标侧使用，Oracle 不允许带 schema）
+func qualifyBare(name string) string {
+	_, table := types.SplitQualified(name)
+	return table
+}
+
 func init() {
 	types.RegisterAdapter(types.Oracle, func() types.DatabaseAdapter {
 		return &Adapter{brand: "Oracle"}
@@ -247,6 +253,8 @@ func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, er
 }
 
 // RestoreFromBackup 从备份表恢复
+// 注意：RENAME TO 目标侧不能带 schema（Oracle 语法限制），
+// 重命名后留在备份表所在 schema（与原表同 schema，语义正确）
 func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
@@ -256,7 +264,7 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 		}
 	}
 	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`,
-		qualifyTable(backupName), qualifyTable(originalName)))
+		qualifyTable(backupName), oraIdent(qualifyBare(originalName))))
 	if err != nil {
 		return fmt.Errorf("Oracle: 恢复备份失败: %w", err)
 	}
