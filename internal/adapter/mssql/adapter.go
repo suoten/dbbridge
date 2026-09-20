@@ -1031,13 +1031,21 @@ func quoteIdentifiers(cols []string) string {
 
 // buildPhysicalRowIDQuery 构建物理行游标分页查询（纯函数，便于单测防回归）。
 // 首批（无 lastRowID）用 @p1 占位 limit，续批用 @p1 比较 @p2 占位 limit。
+//
+// 关键约束：WHERE 游标比较与 ORDER BY 必须使用同一个表达式
+// CONVERT(bigint, %%physloc%%)。
+// 曾经的 Bug：ORDER BY 用原始 %%physloc%%（varbinary 按无符号二进制排序），
+// 而 WHERE 用 CONVERT(bigint,...)（有符号解释）。高位为 1 的 physloc
+// 转换后是负数，在二进制排序中却排在最后：续批 WHERE bigint > 负数游标
+// 会重新捞出前面已迁移的正数行、跳过后面的负数行，造成重复+静默丢数据
+// 且程序误报迁移完成。两个表达式排序语义一致后游标才能正确推进。
 func buildPhysicalRowIDQuery(colList, escapedTable string, hasLastRowID bool) string {
 	if hasLastRowID {
 		return fmt.Sprintf(
-			"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] WHERE CONVERT(bigint, %s) > @p1 ORDER BY %s OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
+			"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] WHERE CONVERT(bigint, %s) > @p1 ORDER BY CONVERT(bigint, %s) OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
 			colList, mssqlPhysLoc, escapedTable, mssqlPhysLoc, mssqlPhysLoc)
 	}
 	return fmt.Sprintf(
-		"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] ORDER BY %s OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
+		"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] ORDER BY CONVERT(bigint, %s) OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
 		colList, mssqlPhysLoc, escapedTable, mssqlPhysLoc)
 }
