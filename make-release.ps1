@@ -172,8 +172,10 @@ $linuxFiles = @(
 )
 
 # 打包函数
-function Package-Zip($tag, $binKey, $isWindows, $extraFiles) {
-    $ext = if ($isWindows) { ".exe" } else { "" }
+# 注意：参数不能叫 isWindows —— pwsh 7 中 $IsWindows 是只读自动变量，
+# 参数名与之冲突会报 "Cannot overwrite variable isWindows"
+function Package-Zip($tag, $binKey, $isWinHost, $extraFiles) {
+$ext = if ($isWinHost) { ".exe" } else { "" }
     $pkgDir = "release/dbbridge-$tag-pkg"
     New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
 
@@ -190,8 +192,8 @@ function Package-Zip($tag, $binKey, $isWindows, $extraFiles) {
         }
     }
 
-    # Windows 包额外包含图标
-    if ($isWindows -and (Test-Path "build/appicon.png")) {
+# Windows 包额外包含图标
+if ($isWinHost -and (Test-Path "build/appicon.png")) {
         Copy-Item "build/appicon.png" "$pkgDir/"
     }
 
@@ -207,13 +209,13 @@ function Package-Zip($tag, $binKey, $isWindows, $extraFiles) {
 }
 
 # 打包 Linux amd64
-Package-Zip -tag "linux-amd64" -binKey "dbbridge-linux-amd64" -isWindows $false -extraFiles $linuxFiles
+Package-Zip -tag "linux-amd64" -binKey "dbbridge-linux-amd64" -isWinHost $false -extraFiles $linuxFiles
 
 # 打包 Linux arm64
-Package-Zip -tag "linux-arm64" -binKey "dbbridge-linux-arm64" -isWindows $false -extraFiles $linuxFiles
+Package-Zip -tag "linux-arm64" -binKey "dbbridge-linux-arm64" -isWinHost $false -extraFiles $linuxFiles
 
 # 打包 Windows amd64（不包含 Linux 脚本）
-Package-Zip -tag "windows-amd64" -binKey "dbbridge-windows-amd64.exe" -isWindows $true -extraFiles $null
+Package-Zip -tag "windows-amd64" -binKey "dbbridge-windows-amd64.exe" -isWinHost $true -extraFiles $null
 
 # ============================================================
 # 4. 生成 SHA256 校验文件
