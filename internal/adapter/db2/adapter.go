@@ -483,10 +483,15 @@ func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, `"`, `""`)
 }
 
-// ReadDataByPhysicalRowID 基于 Db2 窗口函数的伪行号游标分页。
-// Db2 没有 Oracle ROWID 这样的物理行标识符，
-// 但 Db2 支持 ROW_NUMBER() 窗口函数，可以用行号做游标分页。
-// 返回的每行包含 _physrowid 列存储行号，编排器用它推进游标并在写入前移除。
+// ReadDataByPhysicalRowID 基于 Db2 RID() 的物理行游标分页。
+// Db2 没有可直接查询的 ROWID 伪列，但 Db2 9.7+ 提供 RID(t) 函数，
+// 返回 BIGINT 类型的物理行标识（即使无主键也可用）。
+//
+// 防回归：不能用 ROW_NUMBER() OVER (ORDER BY 常量) 造行号——常量排序
+// 下行号分配由访问计划决定、跨批次不确定，第一批与第二批的行号可能
+// 对应不同物理行，游标推进后造成重复/静默丢数据且误报迁移完成。
+// RID() 返回 BIGINT，Go 侧 int64 直接回传比较参数，类型往返无损。
+// 返回的每行包含 _physrowid 列，编排器用它推进游标并在写入前移除。
 func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]types.Row, error) {
 	schema, err := a.GetTableSchema(ctx, tableName)
 	if err != nil {
@@ -498,27 +503,15 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 	}
 
 	colList := quoteIdentifiers(cols)
-	var query string
+	query := buildPhysicalRowIDQuery(colList, escapeIdent(tableName), lastRowID != nil)
 	var args []any
 	if lastRowID != nil {
-		query = fmt.Sprintf(
-			`SELECT * FROM (
-				SELECT %s, ROW_NUMBER() OVER (ORDER BY (VALUES(1))) AS rn
-				FROM "%s"
-			) WHERE rn > ? ORDER BY rn FETCH FIRST ? ROWS ONLY`,
-			colList, escapeIdent(tableName))
 		args = append(args, lastRowID, limit)
 	} else {
-		query = fmt.Sprintf(
-			`SELECT * FROM (
-				SELECT %s, ROW_NUMBER() OVER (ORDER BY (VALUES(1))) AS rn
-				FROM "%s"
-			) ORDER BY rn FETCH FIRST ? ROWS ONLY`,
-			colList, escapeIdent(tableName))
 		args = append(args, limit)
 	}
 
-	// 使用动态列扫描（查询返回 colList + rn）
+	// 使用动态列扫描（查询返回 colList + "_physrowid"，别名加引号防 Db2 转大写）
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("IBM Db2: query data failed: %w", err)
@@ -542,8 +535,8 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 		}
 		row := make(types.Row)
 		for i, col := range colNames {
-			if col == "RN" || col == "rn" {
-				row["_physrowid"] = values[i]
+			if b, ok := values[i].([]byte); ok {
+				row[col] = string(b)
 			} else {
 				row[col] = values[i]
 			}
@@ -554,4 +547,20 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 		return nil, fmt.Errorf("IBM Db2: iterate data failed: %w", err)
 	}
 	return result, nil
+}
+
+// buildPhysicalRowIDQuery 构建 Db2 物理行游标分页查询（纯函数，便于单测防回归）。
+// RID("表名") 返回 BIGINT 物理行标识；WHERE 游标比较与 ORDER BY 使用同一
+// 表达式 RID("表名")，保证排序语义一致；_physrowid 别名加引号，
+// 防止 Db2 将未加引号的别名转为大写导致编排器取不到游标值。
+func buildPhysicalRowIDQuery(colList, escapedTable string, hasLastRowID bool) string {
+	rid := fmt.Sprintf(`RID("%s")`, escapedTable)
+	if hasLastRowID {
+		return fmt.Sprintf(
+			`SELECT %s, %s AS "_physrowid" FROM "%s" WHERE %s > ? ORDER BY %s FETCH FIRST ? ROWS ONLY`,
+			colList, rid, escapedTable, rid, rid)
+	}
+	return fmt.Sprintf(
+		`SELECT %s, %s AS "_physrowid" FROM "%s" ORDER BY %s FETCH FIRST ? ROWS ONLY`,
+		colList, rid, escapedTable, rid)
 }

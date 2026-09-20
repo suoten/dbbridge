@@ -793,9 +793,15 @@ func escapeIdent(name string) string {
 }
 
 // ReadDataByPhysicalRowID 基于 MySQL 窗口函数的伪行号游标分页。
-// MySQL 没有 Oracle ROWID / PG ctid 这样的物理行标识符，
+// MySQL 没有 Oracle ROWID / PG ctid / MSSQL %%physloc%% 这样的物理行标识符，
 // 但 MySQL 8.0+ 支持 ROW_NUMBER() 窗口函数，可以用行号做游标分页。
-// 注意：行号是查询时的逻辑序号，必须配合 ORDER BY 保证稳定性。
+//
+// 已知限制：窗口 ORDER BY (SELECT NULL) 为常量排序，行号分配依赖引擎按
+// 聚簇索引顺序扫描（InnoDB 对无主键表使用内部 rowid 单调递增的
+// GEN_CLUST_INDEX，静态表下跨批次一致）。无法用全列排序替代：
+// 每批都会引入 O(N log N) filesort，且完全重复行组之间顺序仍不确定。
+// 无主键表建议优先建主键/唯一索引走 keyset 路径；编排器在回退
+// OFFSET/行号路径时已有漏行/重复行风险告警。
 // 返回的每行包含 _physrowid 列存储行号，编排器用它推进游标并在写入前移除。
 func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, lastRowID any, limit int) ([]types.Row, error) {
 	schema, err := a.GetTableSchema(ctx, tableName)
