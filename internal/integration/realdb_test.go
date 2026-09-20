@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 
 	_ "dbbridge/internal/adapter/mssql"
 	_ "dbbridge/internal/adapter/mysql"
+	_ "dbbridge/internal/adapter/oracle"
 	_ "dbbridge/internal/adapter/postgres"
 	_ "dbbridge/internal/adapter/sqlite"
 
@@ -202,5 +204,12 @@ func (r *rawDB) mustEqual(name string, want, got int64) {
 	r.t.Helper()
 	if want != got {
 		r.t.Fatalf("%s = %d，期望 %d", name, got, want)
+	}
+}
+
+func (r *rawDB) mustContain(name, got, substr string) {
+	r.t.Helper()
+	if !strings.Contains(got, substr) {
+		r.t.Fatalf("%s = %q，应包含 %q", name, got, substr)
 	}
 }

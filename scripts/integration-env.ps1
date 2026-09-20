@@ -3,7 +3,7 @@
 param([switch]$Down)
 
 if ($Down) {
-    docker rm -f dbbridge-it-mysql dbbridge-it-pg dbbridge-it-mssql 2>$null | Out-Null
+    docker rm -f dbbridge-it-mysql dbbridge-it-pg dbbridge-it-mssql dbbridge-it-oracle 2>$null | Out-Null
     Write-Host "集成测试容器已移除"
     return
 }
@@ -30,12 +30,22 @@ docker run -d --name dbbridge-it-mssql `
     -e MSSQL_MEMORY_LIMIT_MB=2048 `
     -p 14333:1433 mcr.microsoft.com/mssql/server:2022-latest
 
+# Oracle Free 23ai（system/Oracle123，服务名 FREEPDB1；首次启动需 1-2 分钟）
+docker rm -f dbbridge-it-oracle 2>$null | Out-Null
+docker run -d --name dbbridge-it-oracle `
+    -e ORACLE_PASSWORD=Oracle123 `
+    -p 15321:1521 gvenzl/oracle-free:23.9-slim-faststart
+
 Write-Host "容器已启动：等待就绪..."
-$deadline = (Get-Date).AddSeconds(120)
+$deadline = (Get-Date).AddSeconds(180)
+$oraReady = $false
 do {
     Start-Sleep -Seconds 3
     $mysqlReady = docker exec dbbridge-it-mysql mysqladmin ping -uroot -proot123 --silent 2>$null
     $pgReady = docker exec dbbridge-it-pg pg_isready -U postgres 2>$null
-    Write-Host "MySQL: $(if ($mysqlReady) {'ready'} else {'waiting'})  PG: $(if ($pgReady) {'ready'} else {'waiting'})"
-} while (((Get-Date) -lt $deadline) -and (-not ($mysqlReady -and $pgReady)))
-Write-Host "MySQL=3307 PostgreSQL=5433 MSSQL=14333（MSSQL 启动较慢，约 30-60 秒后可用）"
+    if (-not $oraReady) {
+        $oraReady = (docker logs dbbridge-it-oracle 2>&1 | Select-String "DATABASE IS READY TO USE" -Quiet)
+    }
+    Write-Host "MySQL: $(if ($mysqlReady) {'ready'} else {'waiting'})  PG: $(if ($pgReady) {'ready'} else {'waiting'})  Oracle: $(if ($oraReady) {'ready'} else {'waiting'})"
+} while (((Get-Date) -lt $deadline) -and (-not ($mysqlReady -and $pgReady -and $oraReady)))
+Write-Host "MySQL=3307 PostgreSQL=5433 MSSQL=14333 Oracle=15321（MSSQL/Oracle 启动较慢，日志确认就绪后可用）"
