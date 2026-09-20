@@ -38,6 +38,7 @@ type Base struct {
 	db         *sql.DB
 	noComments bool
 	binaryType string
+	tablespace string // 目标表空间（可选，CREATE TABLE 时追加 TABLESPACE 子句）
 }
 
 // New 创建基座实例
@@ -190,11 +191,13 @@ func normalizePGDefault(def string) string {
 
 var pgNumericPattern = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 
-// GetTableSchema 获取表结构
+// GetTableSchema 获取表结构（支持 "schema.table" 限定名；未配置映射时查 public schema）
 func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{
 		Name: tableName,
 	}
+	schemaName, table := types.SplitQualified(tableName)
+	schemaFilter := "table_schema = COALESCE(NULLIF($2, ''), 'public')"
 
 	// 获取表注释
 	if !a.noComments {
@@ -213,9 +216,9 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		       numeric_precision, numeric_scale, is_nullable,
 		       column_default, ordinal_position
 		FROM information_schema.columns
-		WHERE table_schema = 'public' AND table_name = $1
+		WHERE `+schemaFilter+` AND table_name = $1
 		ORDER BY ordinal_position
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询列信息失败: %w", a.brand(), err)
 	}
@@ -276,11 +279,11 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		JOIN information_schema.key_column_usage kcu
 			ON tc.constraint_name = kcu.constraint_name
 			AND tc.table_schema = kcu.table_schema
-		WHERE tc.table_schema = 'public'
-		AND tc.table_name = $1
-		AND tc.constraint_type = 'PRIMARY KEY'
-		ORDER BY kcu.ordinal_position
-	`, tableName)
+WHERE tc.table_schema = COALESCE(NULLIF($2, ''), 'public')
+AND tc.table_name = $1
+AND tc.constraint_type = 'PRIMARY KEY'
+ORDER BY kcu.ordinal_position
+`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询主键信息失败: %w", a.brand(), err)
 	}
@@ -333,11 +336,11 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		LEFT JOIN information_schema.referential_constraints rc
 			ON rc.constraint_name = tc.constraint_name
 			AND rc.constraint_schema = tc.table_schema
-		WHERE tc.table_schema = 'public'
+		WHERE tc.table_schema = COALESCE(NULLIF($2, ''), 'public')
 		AND tc.table_name = $1
 		AND tc.constraint_type = 'FOREIGN KEY'
 		ORDER BY tc.constraint_name, kcu.ordinal_position
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询外键信息失败: %w", a.brand(), err)
 	}
@@ -412,35 +415,43 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 // GetRowCount 获取表的行数
 func (a *Base) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(tableName))).Scan(&count)
+	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, qualifyTable(tableName))).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("%s: 获取行数失败: %w", a.brand(), err)
 	}
 	return count, nil
 }
 
-// TableExists 检查表是否存在
+// TableExists 检查表是否存在（支持 "schema.table" 限定名；未配置时查 public）
 func (a *Base) TableExists(ctx context.Context, tableName string) (bool, error) {
 	var count int
+	schemaName, table := types.SplitQualified(tableName)
 	err := a.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_name = $1
-	`, tableName).Scan(&count)
+		WHERE table_schema = COALESCE(NULLIF($1, ''), 'public') AND table_name = $2
+	`, schemaName, table).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("%s: 检查表存在失败: %w", a.brand(), err)
 	}
 	return count > 0, nil
 }
 
-// BackupTable 将表重命名为备份表名
+// BackupTable 将表重命名为备份表名（支持 "schema.table" 限定名，
+// ALTER TABLE ... RENAME TO 的目标不带 schema，重命名后留在原 Schema，
+// 返回限定名便于后续恢复/删除定位）
 func (a *Base) BackupTable(ctx context.Context, tableName string) (string, error) {
-	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" RENAME TO "%s"`,
-		escapeIdent(tableName), escapeIdent(backupName)))
-	if err != nil {
-		return "", fmt.Errorf("%s: 备份表失败 (%s→%s): %w", a.brand(), tableName, backupName, err)
+	schemaName, table := types.SplitQualified(tableName)
+	backupName := fmt.Sprintf("_bak_%s_%s", table, time.Now().Format("20060102_150405"))
+	qualifiedBackup := backupName
+	if schemaName != "" {
+		qualifiedBackup = schemaName + "." + backupName
 	}
-	return backupName, nil
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
+		qualifyTable(tableName), escapeIdent(backupName)))
+	if err != nil {
+		return "", fmt.Errorf("%s: 备份表失败 (%s→%s): %w", a.brand(), tableName, qualifiedBackup, err)
+	}
+	return qualifiedBackup, nil
 }
 
 // RestoreFromBackup 从备份表恢复（删除当前同名表，将备份表重命名回去）
@@ -449,13 +460,13 @@ func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName s
 	if exists {
 		// 不用 CASCADE：级联会静默删除依赖视图/外键，把“恢复备份”变成数据破坏。
 		// 有依赖时 DROP 报错，用户可显式处理依赖后再恢复。
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, escapeIdent(originalName)))
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s`, qualifyTable(originalName)))
 		if err != nil {
 			return fmt.Errorf("%s: 恢复备份时删除当前表失败（可能存在依赖视图/外键，请先处理依赖）: %w", a.brand(), err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" RENAME TO "%s"`,
-		escapeIdent(backupName), escapeIdent(originalName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`,
+		qualifyTable(backupName), qualifyTable(originalName)))
 	if err != nil {
 		return fmt.Errorf("%s: 恢复备份失败 (%s→%s): %w", a.brand(), backupName, originalName, err)
 	}
@@ -464,7 +475,7 @@ func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName s
 
 // DropBackup 删除备份表
 func (a *Base) DropBackup(ctx context.Context, backupName string) error {
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS "%s"`, escapeIdent(backupName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s`, qualifyTable(backupName)))
 	if err != nil {
 		return fmt.Errorf("%s: 删除备份表失败: %w", a.brand(), err)
 	}
@@ -477,7 +488,7 @@ func (a *Base) DropBackup(ctx context.Context, backupName string) error {
 // 表存在性由 orchestrator 通过 TableExists 显式判断并执行备份/删除/报错。
 func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("CREATE TABLE \"%s\" (\n", escapeIdent(table.Name)))
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", qualifyTable(table.Name)))
 
 	for i, col := range table.Columns {
 		if i > 0 {
@@ -526,15 +537,20 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 
 	sb.WriteString("\n)")
 
+	// 表空间（可选；未配置时使用目标库默认值）
+	if a.tablespace != "" {
+		sb.WriteString(fmt.Sprintf("\nTABLESPACE \"%s\"", escapeIdent(a.tablespace)))
+	}
+
 	// 表注释与列注释
 	if !a.noComments {
 		if table.Comment != "" {
-			sb.WriteString(fmt.Sprintf(";\nCOMMENT ON TABLE \"%s\" IS '%s'", escapeIdent(table.Name), escapeSingleQuote(table.Comment)))
+			sb.WriteString(fmt.Sprintf(";\nCOMMENT ON TABLE %s IS '%s'", qualifyTable(table.Name), escapeSingleQuote(table.Comment)))
 		}
 		for _, col := range table.Columns {
 			if col.Comment != "" {
-				sb.WriteString(fmt.Sprintf(";\nCOMMENT ON COLUMN \"%s\".\"%s\" IS '%s'",
-					escapeIdent(table.Name), escapeIdent(col.Name), escapeSingleQuote(col.Comment)))
+				sb.WriteString(fmt.Sprintf(";\nCOMMENT ON COLUMN %s.\"%s\" IS '%s'",
+					qualifyTable(table.Name), escapeIdent(col.Name), escapeSingleQuote(col.Comment)))
 			}
 		}
 	}
@@ -545,10 +561,10 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			continue
 		}
 		sb.WriteString(";\n")
-if idx.IsUnique {
-sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX \"%s\" ON \"%s\" (", escapeIdent(idx.Name), escapeIdent(table.Name)))
+		if idx.IsUnique {
+			sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX \"%s\" ON %s (", escapeIdent(idx.Name), qualifyTable(table.Name)))
 		} else {
-			sb.WriteString(fmt.Sprintf("CREATE INDEX \"%s\" ON \"%s\" (", escapeIdent(idx.Name), escapeIdent(table.Name)))
+			sb.WriteString(fmt.Sprintf("CREATE INDEX \"%s\" ON %s (", escapeIdent(idx.Name), qualifyTable(table.Name)))
 		}
 		for i, c := range idx.Columns {
 			if i > 0 {
@@ -564,7 +580,7 @@ sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX \"%s\" ON \"%s\" (", escapeIdent
 
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Base) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf("DROP TABLE IF EXISTS \"%s\"", escapeIdent(tableName)), nil
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyTable(tableName)), nil
 }
 
 // ReadData 按偏移量分页读取数据
@@ -575,7 +591,7 @@ func (a *Base) ReadData(ctx context.Context, tableName string, offset, limit int
 	}
 
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d OFFSET %d`, escapeIdent(tableName), limit, offset)
+	query := fmt.Sprintf(`SELECT * FROM %s LIMIT %d OFFSET %d`, qualifyTable(tableName), limit, offset)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -587,7 +603,7 @@ func (a *Base) ReadDataKeyset(ctx context.Context, tableName, keyColumn string, 
 	}
 
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf(`SELECT * FROM "%s"`, escapeIdent(tableName))
+	query := fmt.Sprintf(`SELECT * FROM %s`, qualifyTable(tableName))
 	args := []any{}
 	if lastKey != nil {
 		args = append(args, lastKey)
@@ -609,8 +625,8 @@ func (a *Base) WriteData(ctx context.Context, tableName string, columns []string
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO "%s" (%s) VALUES (%s)`,
-		escapeIdent(tableName),
+		`INSERT INTO %s (%s) VALUES (%s)`,
+		qualifyTable(tableName),
 		quoteIdentifiers(columns),
 		strings.Join(placeholders, ", "),
 	)
@@ -829,15 +845,15 @@ func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMet
 		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`ALTER TABLE "%s" ADD CONSTRAINT "%s" FOREIGN KEY (`,
-		escapeIdent(tableName), escapeIdent(fkName)))
+	sb.WriteString(fmt.Sprintf(`ALTER TABLE %s ADD CONSTRAINT "%s" FOREIGN KEY (`,
+		qualifyTable(tableName), escapeIdent(fkName)))
 	for i, c := range fk.Columns {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
 		sb.WriteString(fmt.Sprintf(`"%s"`, escapeIdent(c)))
 	}
-	sb.WriteString(fmt.Sprintf(`) REFERENCES "%s" (`, escapeIdent(fk.RefTable)))
+	sb.WriteString(fmt.Sprintf(`) REFERENCES %s (`, qualifyTable(fk.RefTable)))
 	for i, c := range fk.RefColumns {
 		if i > 0 {
 			sb.WriteString(", ")
@@ -863,8 +879,8 @@ func (a *Base) FixAutoIncrementSequences(ctx context.Context, tableName string, 
 		}
 		// setval(seq, MAX(id), true)：有行则序列=MAX(id)，空表则=1
 		query := fmt.Sprintf(
-			`SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE(MAX("%s"), 1), MAX("%s") IS NOT NULL) FROM "%s"`,
-			escapeSingleQuote(tableName), escapeSingleQuote(col.Name), escapeIdent(col.Name), escapeIdent(col.Name), escapeIdent(tableName))
+			`SELECT setval(pg_get_serial_sequence('%s', '%s'), COALESCE(MAX("%s"), 1), MAX("%s") IS NOT NULL) FROM %s`,
+			escapeSingleQuote(tableName), escapeSingleQuote(col.Name), escapeIdent(col.Name), escapeIdent(col.Name), qualifyTable(tableName))
 		if _, err := a.db.ExecContext(ctx, query); err != nil {
 			return fmt.Errorf("%s: 修复序列失败 (%s.%s): %w", a.brand(), tableName, col.Name, err)
 		}
@@ -873,6 +889,23 @@ func (a *Base) FixAutoIncrementSequences(ctx context.Context, tableName string, 
 }
 
 // escapeIdent 转义 PostgreSQL 标识符
+// qualifyTable 生成双引号包裹的表名片段，支持 "schema.table" 限定名
+// （Schema 映射场景由 orchestrator 传入；未配置映射时为普通表名）
+func qualifyTable(name string) string {
+	schema, table := types.SplitQualified(name)
+	if schema == "" {
+		return `"` + escapeIdent(table) + `"`
+	}
+	return `"` + escapeIdent(schema) + `".` + `"` + escapeIdent(table) + `"`
+}
+
+// SetTablespace 设置目标表空间（生成 CREATE TABLE 时追加 TABLESPACE 子句，
+// 索引不指定、跟随表所在表空间）
+func (a *Base) SetTablespace(tablespace string) error {
+	a.tablespace = tablespace
+	return nil
+}
+
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "\"", "\"\"")
 }
@@ -896,12 +929,12 @@ func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, la
 	var args []any
 	if lastRowID != nil {
 		// ctid 是复合类型 (page,offset)，比较用 tid > '(page,offset)'::tid
-		query = fmt.Sprintf(`SELECT %s, ctid::text AS _physrowid FROM "%s" WHERE ctid > $1::tid ORDER BY ctid LIMIT $2`,
-			colList, escapeIdent(tableName))
+		query = fmt.Sprintf(`SELECT %s, ctid::text AS _physrowid FROM %s WHERE ctid > $1::tid ORDER BY ctid LIMIT $2`,
+			colList, qualifyTable(tableName))
 		args = append(args, lastRowID, limit)
 	} else {
-		query = fmt.Sprintf(`SELECT %s, ctid::text AS _physrowid FROM "%s" ORDER BY ctid LIMIT $1`,
-			colList, escapeIdent(tableName))
+		query = fmt.Sprintf(`SELECT %s, ctid::text AS _physrowid FROM %s ORDER BY ctid LIMIT $1`,
+			colList, qualifyTable(tableName))
 		args = append(args, limit)
 	}
 

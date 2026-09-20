@@ -11,30 +11,30 @@ import (
 
 	// 导入适配器包，触发 init() 自动注册
 	// 第一阶段：开源主流
+	_ "dbbridge/internal/adapter/mariadb"
 	_ "dbbridge/internal/adapter/mysql"
+	_ "dbbridge/internal/adapter/oceanbase"
 	_ "dbbridge/internal/adapter/postgres"
 	_ "dbbridge/internal/adapter/sqlite"
-	_ "dbbridge/internal/adapter/mariadb"
-	_ "dbbridge/internal/adapter/oceanbase"
 	// 第二阶段：云原生与国产化
-	_ "dbbridge/internal/adapter/tidb"
-	_ "dbbridge/internal/adapter/polardb"
-	_ "dbbridge/internal/adapter/opengauss"
-	_ "dbbridge/internal/adapter/dameng"
-	_ "dbbridge/internal/adapter/kingbase"
 	_ "dbbridge/internal/adapter/aurora"
 	_ "dbbridge/internal/adapter/cockroachdb"
+	_ "dbbridge/internal/adapter/dameng"
+	_ "dbbridge/internal/adapter/kingbase"
+	_ "dbbridge/internal/adapter/opengauss"
+	_ "dbbridge/internal/adapter/polardb"
+	_ "dbbridge/internal/adapter/tidb"
 	// 第三阶段：主流商业与 NoSQL
-	_ "dbbridge/internal/adapter/oracle"
-	_ "dbbridge/internal/adapter/mssql"
-	_ "dbbridge/internal/adapter/db2"
-	_ "dbbridge/internal/adapter/mongodb"
-	_ "dbbridge/internal/adapter/redis"
 	_ "dbbridge/internal/adapter/cassandra"
-	_ "dbbridge/internal/adapter/scylladb"
+	_ "dbbridge/internal/adapter/db2"
 	_ "dbbridge/internal/adapter/influxdb"
-	_ "dbbridge/internal/adapter/timescaledb"
+	_ "dbbridge/internal/adapter/mongodb"
+	_ "dbbridge/internal/adapter/mssql"
+	_ "dbbridge/internal/adapter/oracle"
+	_ "dbbridge/internal/adapter/redis"
+	_ "dbbridge/internal/adapter/scylladb"
 	_ "dbbridge/internal/adapter/tdengine"
+	_ "dbbridge/internal/adapter/timescaledb"
 	// 第四阶段：桌面/文件型数据库
 	_ "dbbridge/internal/adapter/access"
 	"dbbridge/internal/history"
@@ -98,6 +98,10 @@ type StartMigrationRequest struct {
 	AutoRollback    bool              `json:"autoRollback"`
 	MigrateTriggers bool              `json:"migrateTriggers"`
 	MigrateRoutines bool              `json:"migrateRoutines"`
+	// Schema 映射与表空间（不传/留空时行为与既往版本完全一致）
+	SchemaDefault string            `json:"schemaDefault,omitempty"`
+	SchemaTables  map[string]string `json:"schemaTables,omitempty"`
+	Tablespace    string            `json:"tablespace,omitempty"`
 }
 
 // SimpleResult 通用操作结果
@@ -220,6 +224,9 @@ func (a *App) StartMigration(req StartMigrationRequest) *types.MigrationReport {
 		AutoRollback:    req.AutoRollback,
 		MigrateTriggers: req.MigrateTriggers,
 		MigrateRoutines: req.MigrateRoutines,
+		SchemaDefault:   req.SchemaDefault,
+		SchemaTables:    req.SchemaTables,
+		Tablespace:      req.Tablespace,
 	}
 
 	report, err := a.migrationService.Run(config,

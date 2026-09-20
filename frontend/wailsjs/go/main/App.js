@@ -54,6 +54,10 @@ export function LintSQL(arg1) {
   return window['go']['main']['App']['LintSQL'](arg1);
 }
 
+export function OpenInFolder(arg1) {
+  return window['go']['main']['App']['OpenInFolder'](arg1);
+}
+
 export function RestoreAllTables(arg1) {
   return window['go']['main']['App']['RestoreAllTables'](arg1);
 }

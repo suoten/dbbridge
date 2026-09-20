@@ -24,14 +24,14 @@ func TestBuildPhysicalRowIDQueryUsesRID(t *testing.T) {
 		{name: "next batch", hasLastRowID: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query := buildPhysicalRowIDQuery(colList, "orders", tc.hasLastRowID)
+			query := buildPhysicalRowIDQuery(colList, qualifyTable("orders"), tc.hasLastRowID)
 
 			// 禁止 ROW_NUMBER 常量排序方案回归
 			if strings.Contains(query, "ROW_NUMBER") || strings.Contains(query, "VALUES(1)") {
 				t.Errorf("禁止使用 ROW_NUMBER 常量排序（跨批次行号不确定，静默丢数据 Bug 复发）\nSQL: %s", query)
 			}
 
-			// WHERE 比较与 ORDER BY 表达式必须一致（均为 RID("orders")）
+			// WHERE 比较与 ORDER BY 表达式必须一致（qualifyTable("orders") → "orders"）
 			const rid = `RID("orders")`
 			if !strings.Contains(query, `AS "_physrowid"`) {
 				t.Errorf("_physrowid 别名必须加引号防 Db2 转大写\nSQL: %s", query)

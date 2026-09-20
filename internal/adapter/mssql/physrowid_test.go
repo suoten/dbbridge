@@ -20,7 +20,7 @@ func TestBuildPhysicalRowIDQueryKeepsDoublePercent(t *testing.T) {
 		{name: "next batch", hasLastRowID: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query := buildPhysicalRowIDQuery(colList, "orders", tc.hasLastRowID)
+			query := buildPhysicalRowIDQuery(colList, qualifyTable("orders"), tc.hasLastRowID)
 
 			// 必须出现双百分号的物理行定位符，共 2 处（SELECT 列 + ORDER BY）或 3 处（含 WHERE）
 			wantCount := 2
@@ -80,7 +80,7 @@ func TestBuildPhysicalRowIDQueryOrdersByConvertedExpression(t *testing.T) {
 		{name: "next batch", hasLastRowID: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query := buildPhysicalRowIDQuery(colList, "orders", tc.hasLastRowID)
+			query := buildPhysicalRowIDQuery(colList, qualifyTable("orders"), tc.hasLastRowID)
 
 			// ORDER BY 必须包裹 CONVERT(bigint, ...)，禁止裸 %%physloc%%
 			const orderByConverted = "ORDER BY CONVERT(bigint, %%physloc%%)"

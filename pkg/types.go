@@ -1,15 +1,17 @@
 package types
 
+import "strings"
+
 // DatabaseType 数据库类型枚举
 type DatabaseType string
 
 const (
 	// 第一阶段：开源主流
-	MySQL       DatabaseType = "mysql"
-	PostgreSQL  DatabaseType = "postgres"
-	SQLite      DatabaseType = "sqlite"
-	MariaDB     DatabaseType = "mariadb"
-	OceanBase   DatabaseType = "oceanbase"
+	MySQL      DatabaseType = "mysql"
+	PostgreSQL DatabaseType = "postgres"
+	SQLite     DatabaseType = "sqlite"
+	MariaDB    DatabaseType = "mariadb"
+	OceanBase  DatabaseType = "oceanbase"
 
 	// 第二阶段：云原生与国产化
 	TiDB        DatabaseType = "tidb"
@@ -141,6 +143,25 @@ type RoutineParam struct {
 // Row 一行数据，使用 map 表示列名到值的映射
 type Row map[string]any
 
+// TablespaceAware 支持表空间/文件组配置的目标适配器。
+// 表空间是全局配置（对所有表一致），在连接建立后设置一次即可，
+// 与并发表迁移无竞争；Schema 映射因逐表不同，走无状态的限定名传递
+// （orchestrator 把表名解析为 "schema.table" 传入适配器），不走接口状态。
+type TablespaceAware interface {
+	SetTablespace(tablespace string) error
+}
+
+// SplitQualified 将可能带 Schema 限定的表名拆分为 (schema, table)。
+// "a.b" -> ("a", "b")；"b" -> ("", "b")。
+// 约定：orchestrator 仅在配置了 Schema 映射时才生成限定名；
+// 未配置映射时表名原样传递，不会引入点号。
+func SplitQualified(name string) (schema, table string) {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		return name[:i], name[i+1:]
+	}
+	return "", name
+}
+
 // MigrationConfig 迁移配置
 type MigrationConfig struct {
 	Source          ConnectionConfig `json:"source"`
@@ -158,6 +179,19 @@ type MigrationConfig struct {
 	AutoRollback    bool             `json:"autoRollback"`            // 迁移失败时自动回滚到备份
 	MigrateTriggers bool             `json:"migrateTriggers"`         // 迁移触发器
 	MigrateRoutines bool             `json:"migrateRoutines"`         // 迁移存储过程/函数
+
+	// Schema 映射与表空间（不配置时行为与既往版本完全一致）
+	SchemaDefault string            `json:"schemaDefault,omitempty"` // 全局默认目标 Schema（空=目标连接默认库）
+	SchemaTables  map[string]string `json:"schemaTables,omitempty"`  // 按表覆盖：源表名 -> 目标 Schema
+	SchemaRegex   []SchemaRule      `json:"schemaRegex,omitempty"`   // 正则规则（按顺序匹配，首个命中生效）
+	Tablespace    string            `json:"tablespace,omitempty"`    // 目标表空间/文件组（支持的目标库才生效）
+}
+
+// SchemaRule 正则形式的 Schema 映射规则
+// Target 支持 $1/$2 捕获组引用（regexp.ReplaceAllString 语义）
+type SchemaRule struct {
+	Pattern string `json:"pattern"`
+	Target  string `json:"target"`
 }
 
 // ProgressInfo 迁移进度信息
@@ -183,10 +217,10 @@ type LogEntry struct {
 
 // MigrationReport 迁移报告
 type MigrationReport struct {
-StartTime        string        `json:"startTime"`
-EndTime          string        `json:"endTime"`
-Duration         string        `json:"duration"`
-LogFile          string        `json:"logFile,omitempty"` // 本次迁移完整日志的本地文件路径
+	StartTime        string        `json:"startTime"`
+	EndTime          string        `json:"endTime"`
+	Duration         string        `json:"duration"`
+	LogFile          string        `json:"logFile,omitempty"` // 本次迁移完整日志的本地文件路径
 	TablesTotal      int           `json:"tablesTotal"`
 	TablesSuccess    int           `json:"tablesSuccess"`
 	TablesFailed     int           `json:"tablesFailed"`

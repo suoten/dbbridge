@@ -56,7 +56,29 @@ func (c *Converter) convertCreateTable(ddl string) (string, error) {
 	}
 
 	// 用目标适配器生成新 DDL
-	return c.targetAdapter.GenerateCreateTableDDL(*schema)
+	out, err := c.targetAdapter.GenerateCreateTableDDL(*schema)
+	if err != nil {
+		return "", err
+	}
+	// 转换器层补回 IF NOT EXISTS：脚本转换产物用户常需重复执行，
+	// 而迁移链路已禁止适配器生成 IF NOT EXISTS（防止建表被静默跳过），
+	// 该严格语义不应外溢到脚本工具——此处只影响 SQL 脚本转换。
+	return ensureIfNotExists(out), nil
+}
+
+// ensureIfNotExists 在 CREATE TABLE 后补插 IF NOT EXISTS（幂等：已存在则原样返回）。
+// 注：Go regexp（RE2）不支持负向前瞻，用手工前缀判断实现。
+func ensureIfNotExists(ddl string) string {
+	trimmed := strings.TrimLeft(ddl, " \t\r\n")
+	upper := strings.ToUpper(trimmed)
+	if !strings.HasPrefix(upper, "CREATE TABLE") {
+		return ddl
+	}
+	rest := trimmed[len("CREATE TABLE"):]
+	if strings.HasPrefix(strings.ToUpper(strings.TrimLeft(rest, " \t")), "IF NOT EXISTS") {
+		return ddl // 已带 IF NOT EXISTS，幂等返回
+	}
+	return "CREATE TABLE IF NOT EXISTS" + rest
 }
 
 // convertCreateIndex 转换 CREATE INDEX 语句
@@ -91,8 +113,8 @@ func (c *Converter) convertCreateIndex(ddl string) (string, error) {
 			sb.WriteString(", ")
 		}
 		switch c.targetDialect {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
-		sb.WriteString(fmt.Sprintf("`%s`", col))
+		case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
+			sb.WriteString(fmt.Sprintf("`%s`", col))
 		case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB, types.SQLite:
 			sb.WriteString(fmt.Sprintf("\"%s\"", col))
 		default:

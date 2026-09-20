@@ -26,6 +26,8 @@ import {
   ClipboardCheck,
   Compass,
   Link2,
+  FolderInput,
+  HardDrive,
 } from '@lucide/vue'
 import ConnectionForm, { type ConnectionConfig } from './components/ConnectionForm.vue'
 import ProgressPanel from './components/ProgressPanel.vue'
@@ -84,7 +86,30 @@ const migrationConfig = ref({
   autoRollback: true,
   migrateTriggers: false,
   migrateRoutines: false,
+  // Schema 映射与表空间（留空时行为与既往版本完全一致）
+  schemaDefault: '',
+  tablespace: '',
+  schemaTables: {} as Record<string, string>,
 })
+
+// 按表覆盖编辑器状态
+const overrideTableName = ref('')
+const overrideSchema = ref('')
+
+function addSchemaOverride() {
+  const table = overrideTableName.value.trim()
+  const schema = overrideSchema.value.trim()
+  if (!table || !schema) return
+  migrationConfig.value.schemaTables[table] = schema
+  overrideTableName.value = ''
+  overrideSchema.value = ''
+}
+
+function removeSchemaOverride(table: string) {
+  delete migrationConfig.value.schemaTables[table]
+}
+
+const schemaOverrides = computed(() => Object.entries(migrationConfig.value.schemaTables))
 
 const migrating = ref(false)
 const report = ref<any>(null)
@@ -148,6 +173,12 @@ async function startMigration() {
       target: targetConfig.value,
       tables: selectedTables.value,
       ...migrationConfig.value,
+      // 过滤空值，避免向后端传递无效覆盖项
+      schemaTables: Object.fromEntries(
+        Object.entries(migrationConfig.value.schemaTables).filter(([, s]) => s && s.trim() !== '')
+      ),
+      schemaDefault: migrationConfig.value.schemaDefault.trim(),
+      tablespace: migrationConfig.value.tablespace.trim(),
     }
     // @ts-ignore - Wails binding
     report.value = await window.go.main.App.StartMigration(req)
@@ -591,6 +622,57 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
                     </div>
                   </div>
                   <input class="input batch-input" type="number" v-model.number="migrationConfig.batchSize" />
+                </div>
+
+                <div class="option-item option-input">
+                  <div class="option-content">
+                    <FolderInput :size="16" class="option-icon" />
+                    <div>
+                      <span class="option-label">目标 Schema</span>
+                      <span class="option-hint">留空用目标库默认模式</span>
+                    </div>
+                  </div>
+                  <input class="input batch-input" type="text" v-model="migrationConfig.schemaDefault" placeholder="可选" />
+                </div>
+
+                <div class="option-item option-input">
+                  <div class="option-content">
+                    <HardDrive :size="16" class="option-icon" />
+                    <div>
+                      <span class="option-label">目标表空间</span>
+                      <span class="option-hint">仅 Oracle/PG/MSSQL/Db2 生效</span>
+                    </div>
+                  </div>
+                  <input class="input batch-input" type="text" v-model="migrationConfig.tablespace" placeholder="可选" />
+                </div>
+              </div>
+
+              <!-- 按表 Schema 覆盖 -->
+              <div class="schema-override">
+                <div class="schema-override-title">
+                  <span>按表 Schema 覆盖（优先于全局 Schema）</span>
+                </div>
+                <div class="schema-override-editor">
+                  <select class="input schema-override-table" v-model="overrideTableName">
+                    <option value="" disabled>选择表</option>
+                    <option v-for="t in tables" :key="t.name" :value="t.name">{{ t.name }}</option>
+                  </select>
+                  <input
+                    class="input schema-override-schema"
+                    type="text"
+                    v-model="overrideSchema"
+                    placeholder="目标 Schema"
+                    @keyup.enter="addSchemaOverride"
+                  />
+                  <button class="btn btn-ghost schema-override-add" @click="addSchemaOverride" :disabled="!overrideTableName || !overrideSchema.trim()">
+                    添加
+                  </button>
+                </div>
+                <div v-if="schemaOverrides.length > 0" class="schema-override-list">
+                  <div v-for="[table, schema] in schemaOverrides" :key="table" class="schema-override-item">
+                    <span class="schema-override-mapping">{{ table }} → {{ schema }}</span>
+                    <button class="schema-override-remove" @click="removeSchemaOverride(table)" title="移除">×</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1416,5 +1498,80 @@ padding: 8px 4px 4px;
   .footer-hint {
     flex-basis: 100%;
   }
+}
+/* ====== 按表 Schema 覆盖 ====== */
+.schema-override {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--color-border, #e5e7eb);
+}
+
+.schema-override-title {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6b7280);
+  margin-bottom: 8px;
+  font-weight: 500;
+}
+
+.schema-override-editor {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.schema-override-table {
+  flex: 1;
+  min-width: 0;
+}
+
+.schema-override-schema {
+  flex: 1;
+  min-width: 0;
+}
+
+.schema-override-add {
+  flex-shrink: 0;
+}
+
+.schema-override-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.schema-override-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--color-bg-secondary, #f3f4f6);
+  font-size: 12px;
+}
+
+.schema-override-mapping {
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.schema-override-remove {
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.schema-override-remove:hover {
+  color: var(--color-danger, #ef4444);
 }
 </style>

@@ -24,6 +24,30 @@ var _ types.DatabaseAdapter = (*Adapter)(nil)
 // Adapter MSSQL 适配器
 type Adapter struct {
 	db *sql.DB
+
+	tablespace string // 目标文件组（可选，CREATE TABLE 时追加 ON 子句）
+}
+
+// SetTablespace 设置目标文件组（TablespaceAware 接口）
+func (a *Adapter) SetTablespace(tablespace string) error {
+	a.tablespace = tablespace
+	return nil
+}
+
+// qualifyTable 生成方括号包裹的表名片段，支持 "schema.table" 限定名
+// （Schema 映射场景由 orchestrator 传入；未配置映射时为普通表名）
+func qualifyTable(name string) string {
+	schema, table := types.SplitQualified(name)
+	if schema == "" {
+		return "[" + escapeIdent(table) + "]"
+	}
+	return "[" + escapeIdent(schema) + "].[" + escapeIdent(table) + "]"
+}
+
+// qualifyBare 取限定名的表名部分（不带 Schema 前缀，供 sp_rename @newname 使用）
+func qualifyBare(name string) string {
+	_, table := types.SplitQualified(name)
+	return table
 }
 
 func init() {
@@ -458,7 +482,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
 	err := a.db.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT COUNT(*) FROM [%s]", escapeIdent(tableName)),
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyTable(tableName)),
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("MSSQL: 获取行数失败: %w", err)
@@ -466,29 +490,36 @@ func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, err
 	return count, nil
 }
 
-// TableExists 检查表是否存在
+// TableExists 检查表是否存在（支持 "schema.table" 限定名；未配置时查 dbo）
 func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
 	var count int
+	schemaName, table := types.SplitQualified(tableName)
 	err := a.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-		WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @p1
-	`, tableName).Scan(&count)
+		WHERE TABLE_SCHEMA = COALESCE(NULLIF(@p1, ''), 'dbo') AND TABLE_NAME = @p2
+	`, schemaName, table).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("MSSQL: 检查表存在失败: %w", err)
 	}
 	return count > 0, nil
 }
 
-// BackupTable 将表重命名为备份表名
+// BackupTable 将表重命名为备份表名（支持 "schema.table" 限定名，
+// sp_rename 的 @newname 不能带 Schema，重命名后留在原 Schema，返回限定名）
 func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
-	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
+	schemaName, table := types.SplitQualified(tableName)
+	backupName := fmt.Sprintf("_bak_%s_%s", table, time.Now().Format("20060102_150405"))
+	qualifiedBackup := backupName
+	if schemaName != "" {
+		qualifiedBackup = schemaName + "." + backupName
+	}
 	// sp_rename 参数是字符串字面量，内层用方括号包裹标识符（escapeIdent 已双写 ]）
 	_, err := a.db.ExecContext(ctx,
 		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(tableName), escapeIdent(backupName)))
 	if err != nil {
-		return "", fmt.Errorf("MSSQL: 备份表失败 (%s→%s): %w", tableName, backupName, err)
+		return "", fmt.Errorf("MSSQL: 备份表失败 (%s→%s): %w", tableName, qualifiedBackup, err)
 	}
-	return backupName, nil
+	return qualifiedBackup, nil
 }
 
 // RestoreFromBackup 从备份表恢复
@@ -496,13 +527,13 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
 		_, err := a.db.ExecContext(ctx,
-			fmt.Sprintf("DROP TABLE [%s]", escapeIdent(originalName)))
+			fmt.Sprintf("DROP TABLE %s", qualifyTable(originalName)))
 		if err != nil {
 			return fmt.Errorf("MSSQL: 恢复备份时删除当前表失败: %w", err)
 		}
 	}
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(backupName), escapeIdent(originalName)))
+		fmt.Sprintf("EXEC sp_rename '[%s]', '[%s]'", escapeIdent(backupName), escapeIdent(qualifyBare(originalName))))
 	if err != nil {
 		return fmt.Errorf("MSSQL: 恢复备份失败 (%s→%s): %w", backupName, originalName, err)
 	}
@@ -522,7 +553,7 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 // GenerateCreateTableDDL 生成建表 SQL
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("CREATE TABLE [%s] (\n", escapeIdent(table.Name)))
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", qualifyTable(table.Name)))
 
 	// 收集索引列
 	indexedCols := map[string]bool{}
@@ -578,7 +609,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	}
 	if len(pkCols) > 0 {
 		sb.WriteString(",\n  CONSTRAINT [PK_")
-		sb.WriteString(escapeIdent(table.Name))
+		sb.WriteString(escapeIdent(qualifyBare(table.Name)))
 		sb.WriteString("] PRIMARY KEY (")
 		for i, c := range pkCols {
 			if i > 0 {
@@ -603,7 +634,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			}
 			sb.WriteString(fmt.Sprintf("[%s]", escapeIdent(c)))
 		}
-		sb.WriteString(fmt.Sprintf(") REFERENCES [%s] (", escapeIdent(fk.RefTable)))
+		sb.WriteString(fmt.Sprintf(") REFERENCES %s (", qualifyTable(fk.RefTable)))
 		for i, c := range fk.RefColumns {
 			if i > 0 {
 				sb.WriteString(", ")
@@ -627,12 +658,17 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 
 	sb.WriteString("\n)")
 
+	// 目标文件组（可选；未配置时使用默认文件组）
+	if a.tablespace != "" {
+		sb.WriteString(fmt.Sprintf(" ON [%s]", escapeIdent(a.tablespace)))
+	}
+
 	return sb.String(), nil
 }
 
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf("DROP TABLE IF EXISTS [%s]", escapeIdent(tableName)), nil
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyTable(tableName)), nil
 }
 
 // ReadData 按偏移量分页读取数据
@@ -643,8 +679,8 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 	}
 	cols := schemaColumnNames(schema)
 	// MSSQL 使用 OFFSET ... FETCH NEXT 分页
-	query := fmt.Sprintf("SELECT * FROM [%s] ORDER BY (SELECT NULL) OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
-		escapeIdent(tableName), offset, limit)
+	query := fmt.Sprintf("SELECT * FROM %s ORDER BY (SELECT NULL) OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
+		qualifyTable(tableName), offset, limit)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -655,7 +691,7 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 		return nil, fmt.Errorf("MSSQL: 获取表结构失败: %w", err)
 	}
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf("SELECT * FROM [%s]", escapeIdent(tableName))
+	query := fmt.Sprintf("SELECT * FROM %s", qualifyTable(tableName))
 	args := []any{}
 	if lastKey != nil {
 		query += fmt.Sprintf(" WHERE [%s] > @p1", escapeIdent(keyColumn))
@@ -678,8 +714,8 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	}
 
 	query := fmt.Sprintf(
-		"INSERT INTO [%s] (%s) VALUES (%s)",
-		escapeIdent(tableName),
+		"INSERT INTO %s (%s) VALUES (%s)",
+		qualifyTable(tableName),
 		quoteIdentifiers(columns),
 		strings.Join(placeholders, ", "),
 	)
@@ -695,7 +731,7 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	// 且同一会话同时只能对一张表开启，结束后必须在同一连接上关闭，
 	// 否则连接归还池后会污染后续其他表的写入。
 	identityOn := false
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT [%s] ON", escapeIdent(tableName))); err == nil {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET IDENTITY_INSERT %s ON", qualifyTable(tableName))); err == nil {
 		identityOn = true
 	}
 	// turnOff 在同一连接上关闭 IDENTITY_INSERT；必须在 Commit/Rollback 之前调用
@@ -703,7 +739,7 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	turnOffIdentity := func() {
 		if identityOn {
 			// 用独立 ctx 避免 ctx 已取消时漏关
-			_, _ = tx.ExecContext(context.Background(), fmt.Sprintf("SET IDENTITY_INSERT [%s] OFF", escapeIdent(tableName)))
+			_, _ = tx.ExecContext(context.Background(), fmt.Sprintf("SET IDENTITY_INSERT %s OFF", qualifyTable(tableName)))
 		}
 	}
 
@@ -933,8 +969,8 @@ func (a *Adapter) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKey
 		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("ALTER TABLE [%s] ADD CONSTRAINT [%s] FOREIGN KEY (",
-		escapeIdent(tableName), escapeIdent(fkName)))
+	sb.WriteString(fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT [%s] FOREIGN KEY (",
+		qualifyTable(tableName), escapeIdent(fkName)))
 	for i, c := range fk.Columns {
 		if i > 0 {
 			sb.WriteString(", ")
@@ -975,7 +1011,7 @@ func (a *Adapter) FixAutoIncrementSequences(ctx context.Context, tableName strin
 	}
 	// RESEED 不带新值时：表非空则种子重置为该列当前最大值，空表重置为初始值
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("DBCC CHECKIDENT ('[dbo].[%s]', RESEED)", escapeIdent(tableName)))
+		fmt.Sprintf("DBCC CHECKIDENT ('%s', RESEED)", bracketQualified(tableName)))
 	if err != nil {
 		return fmt.Errorf("MSSQL: 重置 IDENTITY 种子失败: %w", err)
 	}
@@ -1008,7 +1044,7 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 	}
 
 	colList := quoteIdentifiers(cols)
-	query := buildPhysicalRowIDQuery(colList, escapeIdent(tableName), lastRowID != nil)
+	query := buildPhysicalRowIDQuery(colList, qualifyTable(tableName), lastRowID != nil)
 	var args []any
 	if lastRowID != nil {
 		args = append(args, lastRowID, limit)
@@ -1039,13 +1075,23 @@ func quoteIdentifiers(cols []string) string {
 // 转换后是负数，在二进制排序中却排在最后：续批 WHERE bigint > 负数游标
 // 会重新捞出前面已迁移的正数行、跳过后面的负数行，造成重复+静默丢数据
 // 且程序误报迁移完成。两个表达式排序语义一致后游标才能正确推进。
+// bracketQualified 生成 "[schema].[table]" 字符串字面量（供 DBCC 等字符串参数使用；
+// 未配置 Schema 时默认 dbo，与既往行为一致）
+func bracketQualified(name string) string {
+	schema, table := types.SplitQualified(name)
+	if schema == "" {
+		schema = "dbo"
+	}
+	return "[" + escapeIdent(schema) + "].[" + escapeIdent(table) + "]"
+}
+
 func buildPhysicalRowIDQuery(colList, escapedTable string, hasLastRowID bool) string {
 	if hasLastRowID {
 		return fmt.Sprintf(
-			"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] WHERE CONVERT(bigint, %s) > @p1 ORDER BY CONVERT(bigint, %s) OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
+			"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM %s WHERE CONVERT(bigint, %s) > @p1 ORDER BY CONVERT(bigint, %s) OFFSET 0 ROWS FETCH NEXT @p2 ROWS ONLY",
 			colList, mssqlPhysLoc, escapedTable, mssqlPhysLoc, mssqlPhysLoc)
 	}
 	return fmt.Sprintf(
-		"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM [%s] ORDER BY CONVERT(bigint, %s) OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
+		"SELECT %s, CONVERT(bigint, %s) AS _physrowid FROM %s ORDER BY CONVERT(bigint, %s) OFFSET 0 ROWS FETCH NEXT @p1 ROWS ONLY",
 		colList, mssqlPhysLoc, escapedTable, mssqlPhysLoc)
 }

@@ -1,4 +1,4 @@
-﻿// Package oracle 注册 Oracle 数据库适配器。
+// Package oracle 注册 Oracle 数据库适配器。
 //
 // Oracle 是全球顶级商业关系型数据库，本适配器基于纯 Go 的 go-ora 驱动（无 CGO 依赖）。
 // 类型映射使用 typeconv 中立类型体系，支持与其他数据库互转。
@@ -22,6 +22,24 @@ import (
 type Adapter struct {
 	db    *sql.DB
 	brand string
+
+	tablespace string // 目标表空间（可选，CREATE TABLE 时追加 TABLESPACE 子句）
+}
+
+// SetTablespace 设置目标表空间（TablespaceAware 接口）
+func (a *Adapter) SetTablespace(tablespace string) error {
+	a.tablespace = tablespace
+	return nil
+}
+
+// qualifyTable 生成表名片段，支持 "schema.table" 限定名
+// （Schema 映射场景由 orchestrator 传入；未配置映射时为普通表名）
+func qualifyTable(name string) string {
+	schema, table := types.SplitQualified(name)
+	if schema == "" {
+		return oraIdent(table)
+	}
+	return oraIdent(schema) + "." + oraIdent(table)
 }
 
 func init() {
@@ -101,15 +119,16 @@ func (a *Adapter) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 // GetTableSchema 获取表结构
 func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{Name: tableName}
+	schemaName, table := types.SplitQualified(tableName)
 
 	// 获取列信息
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
-		       NULLABLE, DATA_DEFAULT, COLUMN_ID
-		FROM USER_TAB_COLUMNS
-		WHERE TABLE_NAME = UPPER(:1)
-		ORDER BY COLUMN_ID
-	`, tableName)
+	SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
+	       NULLABLE, DATA_DEFAULT, COLUMN_ID
+	FROM ALL_TAB_COLUMNS
+	WHERE OWNER = NVL(:1, USER) AND TABLE_NAME = UPPER(:2)
+	ORDER BY COLUMN_ID
+`, schemaName, table)
 	if err != nil {
 		return schema, fmt.Errorf("Oracle: 查询列信息失败: %w", err)
 	}
@@ -154,12 +173,12 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 
 	// 获取主键
 	pkRows, err := a.db.QueryContext(ctx, `
-		SELECT cc.COLUMN_NAME
-		FROM USER_CONSTRAINTS c
-		JOIN USER_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
-		WHERE c.TABLE_NAME = UPPER(:1) AND c.CONSTRAINT_TYPE = 'P'
-		ORDER BY cc.POSITION
-	`, tableName)
+	SELECT cc.COLUMN_NAME
+	FROM ALL_CONSTRAINTS c
+	JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND c.OWNER = cc.OWNER
+	WHERE c.OWNER = NVL(:1, USER) AND c.TABLE_NAME = UPPER(:2) AND c.CONSTRAINT_TYPE = 'P'
+	ORDER BY cc.POSITION
+`, schemaName, table)
 	if err == nil {
 		var pkCols []string
 		for pkRows.Next() {
@@ -188,45 +207,56 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 // GetRowCount 获取表的行数
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, oraIdent(tableName))).Scan(&count)
+	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, qualifyTable(tableName))).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("Oracle: 获取行数失败: %w", err)
 	}
 	return count, nil
 }
 
-// TableExists 检查表是否存在
+// TableExists 检查表是否存在（支持 "schema.table" 限定名；未配置时查当前用户 Schema）
 func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
 	var count int
+	schemaName, table := types.SplitQualified(tableName)
 	err := a.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME = UPPER(:1)
-	`, tableName).Scan(&count)
+SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = NVL(:1, USER) AND TABLE_NAME = UPPER(:2)
+`, schemaName, table).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("Oracle: 检查表存在失败: %w", err)
 	}
 	return count > 0, nil
 }
 
-// BackupTable 将表重命名为备份表名
+// BackupTable 将表重命名为备份表名（支持 "schema.table" 限定名）。
+// Oracle 的 RENAME 只能在当前 Schema 下操作，跨 Schema 统一用
+// ALTER TABLE ... RENAME TO（重命名后留在原 Schema），返回限定名
+// 便于后续恢复/删除定位。
 func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
-	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME %s TO %s`, oraIdent(tableName), oraIdent(backupName)))
-	if err != nil {
-		return "", fmt.Errorf("Oracle: 备份表失败: %w", err)
+	schemaName, table := types.SplitQualified(tableName)
+	backupName := fmt.Sprintf("_bak_%s_%s", table, time.Now().Format("20060102_150405"))
+	qualifiedBackup := backupName
+	if schemaName != "" {
+		qualifiedBackup = schemaName + "." + backupName
 	}
-	return backupName, nil
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`,
+		qualifyTable(tableName), oraIdent(backupName)))
+	if err != nil {
+		return "", fmt.Errorf("Oracle: 备份表失败 (%s→%s): %w", tableName, qualifiedBackup, err)
+	}
+	return qualifiedBackup, nil
 }
 
 // RestoreFromBackup 从备份表恢复
 func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s PURGE`, oraIdent(originalName)))
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s PURGE`, qualifyTable(originalName)))
 		if err != nil {
 			return fmt.Errorf("Oracle: 恢复备份时删除当前表失败: %w", err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME %s TO %s`, oraIdent(backupName), oraIdent(originalName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO %s`,
+		qualifyTable(backupName), qualifyTable(originalName)))
 	if err != nil {
 		return fmt.Errorf("Oracle: 恢复备份失败: %w", err)
 	}
@@ -235,7 +265,7 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 
 // DropBackup 删除备份表
 func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s PURGE`, oraIdent(backupName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s PURGE`, qualifyTable(backupName)))
 	if err != nil {
 		return fmt.Errorf("Oracle: 删除备份表失败: %w", err)
 	}
@@ -246,7 +276,7 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`CREATE TABLE %s (
-`, oraIdent(table.Name)))
+`, qualifyTable(table.Name)))
 
 	for i, col := range table.Columns {
 		if i > 0 {
@@ -292,12 +322,18 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	}
 
 	sb.WriteString("\n)")
+
+	// 表空间（可选；未配置时使用目标库默认值）
+	if a.tablespace != "" {
+		sb.WriteString(fmt.Sprintf("\nTABLESPACE %s", oraIdent(a.tablespace)))
+	}
+
 	return sb.String(), nil
 }
 
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf(`DROP TABLE %s PURGE`, oraIdent(tableName)), nil
+	return fmt.Sprintf(`DROP TABLE %s PURGE`, qualifyTable(tableName)), nil
 }
 
 // ReadData 按偏移量分页读取数据
@@ -323,7 +359,7 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 			SELECT * FROM %s ORDER BY 1
 		) t WHERE ROWNUM <= %d
 	) WHERE rn > %d`,
-		strings.Join(outerCols, ", "), oraIdent(tableName), offset+limit, offset)
+		strings.Join(outerCols, ", "), qualifyTable(tableName), offset+limit, offset)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -341,12 +377,12 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 	if lastKey != nil {
 		query = fmt.Sprintf(`SELECT * FROM (
 			SELECT * FROM %s WHERE %s > :1 ORDER BY %s ASC
-		) WHERE ROWNUM <= %d`, oraIdent(tableName), oraIdent(keyColumn), oraIdent(keyColumn), limit)
+		) WHERE ROWNUM <= %d`, qualifyTable(tableName), oraIdent(keyColumn), oraIdent(keyColumn), limit)
 		args = append(args, lastKey)
 	} else {
 		query = fmt.Sprintf(`SELECT * FROM (
 			SELECT * FROM %s ORDER BY %s ASC
-		) WHERE ROWNUM <= %d`, oraIdent(tableName), oraIdent(keyColumn), limit)
+		) WHERE ROWNUM <= %d`, qualifyTable(tableName), oraIdent(keyColumn), limit)
 	}
 	return a.scanRows(ctx, query, args, cols)
 }
@@ -361,7 +397,7 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		placeholders[i] = fmt.Sprintf(":%d", i+1)
 	}
 	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
-		oraIdent(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
+		qualifyTable(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -494,14 +530,14 @@ func (a *Adapter) FixAutoIncrementSequences(ctx context.Context, tableName strin
 		if err := a.db.QueryRowContext(ctx, query).Scan(&curVal); err != nil {
 			continue
 		}
-		maxQuery := fmt.Sprintf(`SELECT COALESCE(MAX(%s), 0) FROM %s`, oraIdent(col.Name), oraIdent(tableName))
+		maxQuery := fmt.Sprintf(`SELECT COALESCE(MAX(%s), 0) FROM %s`, oraIdent(col.Name), qualifyTable(tableName))
 		var maxVal int64
 		if err := a.db.QueryRowContext(ctx, maxQuery).Scan(&maxVal); err != nil {
 			continue
 		}
 		if maxVal > 0 {
-	a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE %s INCREMENT BY 1 MINVALUE 0`, oraIdent(seqName)))
-		a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE %s RESTART START WITH %d`, oraIdent(seqName), maxVal+1))
+			a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE %s INCREMENT BY 1 MINVALUE 0`, oraIdent(seqName)))
+			a.db.ExecContext(ctx, fmt.Sprintf(`ALTER SEQUENCE %s RESTART START WITH %d`, oraIdent(seqName), maxVal+1))
 		}
 	}
 	return nil
@@ -624,15 +660,15 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 	var args []any
 	if lastRowID != nil {
 		query = fmt.Sprintf(`SELECT %s, ROWIDTOCHAR(rowid) AS _physrowid FROM (
-			SELECT * FROM %s WHERE ROWID > CHARTOROWID(:1) ORDER BY ROWID
-		) WHERE ROWNUM <= %d`,
-			strings.Join(outerCols, ", "), oraIdent(tableName), limit)
+SELECT * FROM %s WHERE ROWID > CHARTOROWID(:1) ORDER BY ROWID
+) WHERE ROWNUM <= %d`,
+			strings.Join(outerCols, ", "), qualifyTable(tableName), limit)
 		args = append(args, lastRowID)
 	} else {
 		query = fmt.Sprintf(`SELECT %s, ROWIDTOCHAR(rowid) AS _physrowid FROM (
 			SELECT * FROM %s ORDER BY ROWID
 		) WHERE ROWNUM <= %d`,
-			strings.Join(outerCols, ", "), oraIdent(tableName), limit)
+			strings.Join(outerCols, ", "), qualifyTable(tableName), limit)
 	}
 
 	allCols := append(append([]string{}, cols...), "_physrowid")

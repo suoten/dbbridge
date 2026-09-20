@@ -10,6 +10,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +42,95 @@ type Orchestrator struct {
 	backups      []types.BackupInfo
 	tableReports map[int]types.TableReport // 按表序号保存，保证报告顺序稳定
 	pendingFKs   []pendingFK               // 延后添加的外键（数据迁完后统一补建）
-logFile      *migrationlog.Writer      // 本地日志文件（可能为 nil：创建失败时降级）
+	logFile      *migrationlog.Writer      // 本地日志文件（可能为 nil：创建失败时降级）
+
+	// Schema 映射：compiledRules 在 Run 启动阶段预编译，之后只读（并发 worker 安全）
+	compiledRules []compiledSchemaRule
+}
+
+// compiledSchemaRule 预编译后的正则映射规则（避免 worker 并发重复编译）
+type compiledSchemaRule struct {
+	re     *regexp.Regexp
+	target string
+}
+
+// schemalessTarget 目标库不支持 schema 概念的类型（限定名映射对其无意义）
+func schemalessTarget(t types.DatabaseType) bool {
+	switch t {
+	case types.SQLite, types.Cassandra, types.ScyllaDB:
+		return true
+	}
+	return false
+}
+
+// initSchemaMapping 启动阶段预编译正则规则并输出映射摘要日志。
+// 返回是否配置了任何映射（含非法正则：照样告警但不阻断）。
+func (o *Orchestrator) initSchemaMapping() bool {
+	cfg := o.config
+	hasMapping := cfg.SchemaDefault != "" || len(cfg.SchemaTables) > 0 || len(cfg.SchemaRegex) > 0
+	if !hasMapping {
+		return false
+	}
+
+	if schemalessTarget(cfg.Target.Type) {
+		o.log("WARN", "", fmt.Sprintf("目标数据库 %s 不支持 schema 概念，模式映射配置将被忽略", cfg.Target.Type))
+		return false
+	}
+
+	o.compiledRules = o.compiledRules[:0]
+	for i, rule := range cfg.SchemaRegex {
+		re, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			o.log("WARN", "", fmt.Sprintf("正则映射规则 #%d 非法，已跳过（pattern=%q）: %v", i+1, rule.Pattern, err))
+			continue
+		}
+		o.compiledRules = append(o.compiledRules, compiledSchemaRule{re: re, target: rule.Target})
+	}
+
+	o.log("INFO", "", fmt.Sprintf("Schema 映射已启用: 全局默认=%q, 按表覆盖=%d 条, 正则规则=%d 条, 目标表空间=%q",
+		cfg.SchemaDefault, len(cfg.SchemaTables), len(o.compiledRules), cfg.Tablespace))
+	return true
+}
+
+// resolveTargetName 将源表名解析为目标限定表名（"schema.table" 或原样裸名）。
+// 优先级：按表覆盖 > 正则规则（顺序匹配首个命中）> 全局默认。
+// 正则规则语义：
+//   - Target 不含点号：Pattern 仅做匹配判定（不消费匹配段），Target 即目标
+//     Schema 名，结果为 Target.原表名；
+//   - Target 含点号：视为完整目标表名模板，用 regexp.ReplaceAllString 展开
+//     （支持 $1 捕获组引用），如 Pattern `^ods_(\w+)$` + Target `archive.$1`。
+//
+// 未配置任何映射时返回原表名，行为与既往版本完全一致。
+func (o *Orchestrator) resolveTargetName(sourceTable string) string {
+	cfg := o.config
+	if cfg.SchemaDefault == "" && len(cfg.SchemaTables) == 0 && len(cfg.SchemaRegex) == 0 {
+		return sourceTable
+	}
+	if schemalessTarget(cfg.Target.Type) {
+		return sourceTable
+	}
+
+	// 1. 按表覆盖（精确匹配，优先级最高）
+	if s, ok := cfg.SchemaTables[sourceTable]; ok && s != "" {
+		return s + "." + sourceTable
+	}
+	// 2. 正则规则（顺序匹配，首个命中生效）
+	for _, rule := range o.compiledRules {
+		if !rule.re.MatchString(sourceTable) {
+			continue
+		}
+		if strings.Contains(rule.target, ".") {
+			// 完整目标表名模板：展开 $1 捕获组
+			return rule.re.ReplaceAllString(sourceTable, rule.target)
+		}
+		// 纯 Schema 名：不消费匹配段，直接拼回原表名
+		return rule.target + "." + sourceTable
+	}
+	// 3. 全局默认
+	if cfg.SchemaDefault != "" {
+		return cfg.SchemaDefault + "." + sourceTable
+	}
+	return sourceTable
 }
 
 // pendingFK 待补建的外键
@@ -253,6 +342,22 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 	version, _ := o.targetAdapter.GetVersion(runCtx)
 	o.log("INFO", "", fmt.Sprintf("目标数据库: %s", version))
 
+	// Schema 映射预编译与摘要日志（未配置时无副作用，行为与既往版本一致）
+	o.initSchemaMapping()
+
+	// 目标表空间：连接后设置一次（连接级配置，无并发竞争）。
+	// 仅 Oracle/PG 系/MSSQL/Db2 等实现 TablespaceAware 的目标库生效，其余告警忽略。
+	if o.config.Tablespace != "" {
+		if ts, ok := o.targetAdapter.(types.TablespaceAware); ok {
+			if err := ts.SetTablespace(o.config.Tablespace); err != nil {
+				return report, fmt.Errorf("设置目标表空间失败: %w", err)
+			}
+			o.log("INFO", "", fmt.Sprintf("目标表空间已设置: %s", o.config.Tablespace))
+		} else {
+			o.log("WARN", "", fmt.Sprintf("目标数据库 %s 不支持表空间配置，已忽略 tablespace=%s", o.config.Target.Type, o.config.Tablespace))
+		}
+	}
+
 	// 2. 获取表列表
 	var tables []string
 	if len(o.config.Tables) > 0 {
@@ -288,7 +393,7 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 					return
 				}
 				tStart := time.Now()
-				rows, err := o.migrateTable(runCtx, t.name)
+				rows, err := o.migrateTable(runCtx, t.name, t.target)
 				tReport := types.TableReport{
 					TableName: t.name,
 					Duration:  time.Since(tStart).Round(time.Millisecond).String(),
@@ -303,9 +408,9 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 						tReport.Status = "failed"
 						tReport.Error = err.Error()
 
-						// 尝试回滚
+						// 尝试回滚（备份记录按源表名查找，恢复发生在目标库的目标表上）
 						if o.config.BackupBefore && o.config.AutoRollback {
-							if o.tryRollback(runCtx, t.name) {
+							if o.tryRollback(runCtx, t.name, t.target) {
 								tReport.RolledBack = true
 								tReport.Status = "rolled_back"
 								o.log("WARN", t.name, "已回滚到迁移前状态")
@@ -342,7 +447,7 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		defer close(tableCh)
 		for i, name := range tables {
 			select {
-			case tableCh <- indexedTable{index: i, name: name}:
+			case tableCh <- indexedTable{index: i, name: name, target: o.resolveTargetName(name)}:
 			case <-runCtx.Done():
 				return
 			}
@@ -430,12 +535,17 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 
 // indexedTable 带原始序号的表任务（保证报告顺序稳定）
 type indexedTable struct {
-	index int
-	name  string
+	index  int
+	name   string // 源表名
+	target string // 目标限定表名（未配置映射时与源表名相同）
 }
 
-// migrateTable 迁移单张表，返回迁移的行数
-func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int64, error) {
+// migrateTable 迁移单张表，返回迁移的行数。
+// tableName 为源表名（源库读侧），targetName 为目标限定表名（目标库写侧）。
+// 表迁移在并行 worker 中执行，因此 schema 解析必须无状态：
+// 禁止在目标连接上做 SetSchema（连接池复用会产生竞争），
+// 统一用 "schema.table" 限定名传递。
+func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName string) (int64, error) {
 	var processed int64
 
 	// 获取源表结构
@@ -449,6 +559,9 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 	}
 
 	o.log("INFO", tableName, fmt.Sprintf("表结构: %d 列, %d 索引", len(schema.Columns), len(schema.Indexes)))
+	if targetName != tableName {
+		o.log("INFO", tableName, fmt.Sprintf("表映射: %s → %s", tableName, targetName))
+	}
 
 	// DataOnly 模式直接向已存在的表追加数据，备份/回滚（基于表重命名）不适用，
 	// 显式告警避免用户误以为有备份保护
@@ -462,7 +575,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 		// 防回归：TableExists 的错误禁止吞掉——一旦检查失败而按"不存在"处理，
 		// 备份/删除选项会静默失效，建表又被 CREATE TABLE 静默跳过（已禁用
 		// IF NOT EXISTS）或数据直接追加，造成数据重复且用户毫无感知。
-		targetExists, err := o.targetAdapter.TableExists(ctx, tableName)
+		targetExists, err := o.targetAdapter.TableExists(ctx, targetName)
 		if err != nil {
 			return 0, fmt.Errorf("检查目标表是否存在失败: %w", err)
 		}
@@ -470,7 +583,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 			if o.config.BackupBefore {
 				// 备份模式：将目标表重命名为备份表名
 				o.log("INFO", tableName, "目标库存在同名表，正在备份...")
-				backupName, err := o.targetAdapter.BackupTable(ctx, tableName)
+				backupName, err := o.targetAdapter.BackupTable(ctx, targetName)
 				if err != nil {
 					return 0, fmt.Errorf("备份目标表失败: %w", err)
 				}
@@ -484,7 +597,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 				o.mu.Unlock()
 			} else if o.config.DropIfExists {
 				// 直接删除模式（错误显式传播）
-				dropDDL, _ := o.targetAdapter.GenerateDropTableDDL(tableName)
+				dropDDL, _ := o.targetAdapter.GenerateDropTableDDL(targetName)
 				o.log("INFO", tableName, "目标库存在同名表，正在删除...")
 				if err := o.targetAdapter.ExecContext(ctx, dropDDL); err != nil {
 					return 0, fmt.Errorf("删除目标同名表失败: %w", err)
@@ -501,12 +614,21 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 		if deferFK {
 			o.mu.Lock()
 			for _, fk := range schema.ForeignKeys {
-				o.pendingFKs = append(o.pendingFKs, pendingFK{table: tableName, fk: fk})
+				// 引用表同样走映射（否则跨 schema 外键会指回源 schema）
+				fk.RefTable = o.resolveTargetName(fk.RefTable)
+				o.pendingFKs = append(o.pendingFKs, pendingFK{table: targetName, fk: fk})
 			}
 			o.mu.Unlock()
 			schema.ForeignKeys = nil
+		} else {
+			// 内联外键（SQLite 或不支持延迟 DDL 的目标库）：同样映射引用表
+			for i := range schema.ForeignKeys {
+				schema.ForeignKeys[i].RefTable = o.resolveTargetName(schema.ForeignKeys[i].RefTable)
+			}
 		}
 
+		// 建表 DDL 用目标限定表名（适配器内部 qualifyTable 按 schema.Name 解析）
+		schema.Name = targetName
 		// 生成并执行建表 SQL（类型已由目标适配器 MapType 完成异构映射）
 		createDDL, err := o.targetAdapter.GenerateCreateTableDDL(schema)
 		if err != nil {
@@ -531,7 +653,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 	if !o.config.StructureOnly {
 		// 如果是仅迁移数据且没有获取结构，则需要获取目标表结构
 		if o.config.DataOnly && len(schema.Columns) == 0 {
-			schema, err = o.targetAdapter.GetTableSchema(ctx, tableName)
+			schema, err = o.targetAdapter.GetTableSchema(ctx, targetName)
 			if err != nil {
 				return 0, fmt.Errorf("获取目标表结构失败: %w", err)
 			}
@@ -626,7 +748,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 				}
 			}
 
-			if err := o.targetAdapter.WriteData(ctx, tableName, columns, rows); err != nil {
+			if err := o.targetAdapter.WriteData(ctx, targetName, columns, rows); err != nil {
 				return processed, fmt.Errorf("写入数据失败 (已处理 %d 行): %w", processed, err)
 			}
 
@@ -660,7 +782,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 		// 自增序列修复：显式插入自增列不会推进种子（MSSQL IDENTITY / PG SERIAL），
 		// 不修复的话目标库下一条自动 INSERT 会主键冲突。失败只告警不阻断迁移结果。
 		if fixer, ok := o.targetAdapter.(types.SequenceFixer); ok {
-			if err := fixer.FixAutoIncrementSequences(ctx, tableName, schema.Columns); err != nil {
+			if err := fixer.FixAutoIncrementSequences(ctx, targetName, schema.Columns); err != nil {
 				o.log("WARN", tableName, fmt.Sprintf("自增序列修复失败（后续 INSERT 可能主键冲突）: %v", err))
 			} else {
 				o.log("INFO", tableName, "自增序列已重置到当前最大值")
@@ -672,13 +794,14 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 }
 
 // tryRollback 尝试回滚单张表到迁移前状态
-// 找到该表的备份记录，将备份表恢复为原表名。
+// sourceName 用于查找备份记录（BackupInfo.OriginalTable 存源表名），
+// targetName（目标限定表名）用于目标库上的恢复操作。
 // 注意：RestoreFromBackup 是网络 I/O，必须在锁外执行，否则会阻塞所有进度上报。
-func (o *Orchestrator) tryRollback(ctx context.Context, tableName string) bool {
+func (o *Orchestrator) tryRollback(ctx context.Context, sourceName, targetName string) bool {
 	o.mu.Lock()
 	var backup *types.BackupInfo
 	for i := range o.backups {
-		if o.backups[i].OriginalTable == tableName && !o.backups[i].Restored {
+		if o.backups[i].OriginalTable == sourceName && !o.backups[i].Restored {
 			backup = &o.backups[i]
 			break
 		}
@@ -690,9 +813,9 @@ func (o *Orchestrator) tryRollback(ctx context.Context, tableName string) bool {
 		return false
 	}
 
-	err := o.targetAdapter.RestoreFromBackup(ctx, backup.BackupTable, tableName)
+	err := o.targetAdapter.RestoreFromBackup(ctx, backup.BackupTable, targetName)
 	if err != nil {
-		o.log("ERROR", tableName, fmt.Sprintf("回滚失败: %v", err))
+		o.log("ERROR", sourceName, fmt.Sprintf("回滚失败: %v", err))
 		return false
 	}
 	o.mu.Lock()

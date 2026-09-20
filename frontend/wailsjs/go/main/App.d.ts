@@ -32,6 +32,8 @@ export function GetTables(arg1:main.ConnectionRequest):Promise<main.GetTablesRes
 
 export function LintSQL(arg1:main.LintSQLRequest):Promise<sqllint.Report>;
 
+export function OpenInFolder(arg1:string):Promise<main.SimpleResult>;
+
 export function RestoreAllTables(arg1:main.RestoreRequest):Promise<main.RestoreAllResult>;
 
 export function RestoreTable(arg1:main.RestoreRequest):Promise<main.RestoreTableResult>;

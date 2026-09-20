@@ -1003,6 +1003,7 @@ export namespace types {
 	    startTime: string;
 	    endTime: string;
 	    duration: string;
+	    logFile?: string;
 	    tablesTotal: number;
 	    tablesSuccess: number;
 	    tablesFailed: number;
@@ -1028,6 +1029,7 @@ export namespace types {
 	        this.startTime = source["startTime"];
 	        this.endTime = source["endTime"];
 	        this.duration = source["duration"];
+	        this.logFile = source["logFile"];
 	        this.tablesTotal = source["tablesTotal"];
 	        this.tablesSuccess = source["tablesSuccess"];
 	        this.tablesFailed = source["tablesFailed"];

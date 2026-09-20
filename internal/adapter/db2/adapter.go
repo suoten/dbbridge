@@ -1,4 +1,4 @@
-﻿// Package db2 registers IBM Db2 adapter.
+// Package db2 registers IBM Db2 adapter.
 //
 // IBM Db2 is an enterprise-grade relational database. Since there is no pure Go
 // driver for Db2 (official go_ibm_db requires CGO + DB2 client libraries), this
@@ -20,8 +20,15 @@ import (
 
 // Adapter Db2 database adapter
 type Adapter struct {
-	db    *sql.DB
-	brand string
+	db         *sql.DB
+	brand      string
+	tablespace string // 目标表空间（CREATE TABLE ... IN "ts"）
+}
+
+// SetTablespace 设置目标表空间（orchestrator 在连接后调用一次，无并发竞争）
+func (a *Adapter) SetTablespace(tablespace string) error {
+	a.tablespace = tablespace
+	return nil
 }
 
 func init() {
@@ -94,14 +101,19 @@ func (a *Adapter) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 }
 
 func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
+	schemaName, table := types.SplitQualified(tableName)
 	schema := types.TableSchema{Name: tableName}
+
+	// schemaFilter：未指定 schema 时用当前模式，否则用指定模式（统一转大写比较）
+	schemaFilter := "TABSCHEMA = CASE WHEN ? = '' THEN CURRENT SCHEMA ELSE UPPER(?) END"
+	schemaArgs := []any{schemaName, schemaName}
 
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT COLNAME, TYPENAME, LENGTH, SCALE, NULLS, DEFAULT, COLNO
 		FROM SYSCAT.COLUMNS
-		WHERE TABNAME = UPPER(?) AND TABSCHEMA = CURRENT SCHEMA
+		WHERE TABNAME = UPPER(?) AND `+schemaFilter+`
 		ORDER BY COLNO
-	`, tableName)
+	`, append([]any{table}, schemaArgs...)...)
 	if err != nil {
 		return schema, fmt.Errorf("IBM Db2: query columns failed: %w", err)
 	}
@@ -145,9 +157,9 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 	pkRows, err := a.db.QueryContext(ctx, `
 		SELECT COLNAME
 		FROM SYSCAT.KEYCOLUSE
-		WHERE TABNAME = UPPER(?) AND TABSCHEMA = CURRENT SCHEMA
+		WHERE TABNAME = UPPER(?) AND `+schemaFilter+`
 		ORDER BY COLSEQ
-	`, tableName)
+	`, append([]any{table}, schemaArgs...)...)
 	if err == nil {
 		var pkCols []string
 		for pkRows.Next() {
@@ -175,7 +187,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(tableName))).Scan(&count)
+	err := a.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, qualifyTable(tableName))).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("IBM Db2: get row count failed: %w", err)
 	}
@@ -183,11 +195,12 @@ func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, err
 }
 
 func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
+	schemaName, table := types.SplitQualified(tableName)
 	var count int
 	err := a.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM SYSCAT.TABLES
-		WHERE TABNAME = UPPER(?) AND TABSCHEMA = CURRENT SCHEMA AND TYPE = 'T'
-	`, tableName).Scan(&count)
+		WHERE TABNAME = UPPER(?) AND TABSCHEMA = CASE WHEN ? = '' THEN CURRENT SCHEMA ELSE UPPER(?) END AND TYPE = 'T'
+	`, table, schemaName, schemaName).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("IBM Db2: check table exists failed: %w", err)
 	}
@@ -195,23 +208,31 @@ func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, erro
 }
 
 func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, error) {
-	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME TABLE "%s" TO "%s"`, escapeIdent(tableName), escapeIdent(backupName)))
+	// 备份表名取裸表名（避免限定名中的点号混入标识符）；RENAME 后留在原 schema
+	_, bareTable := types.SplitQualified(tableName)
+	backupName := fmt.Sprintf("_bak_%s_%s", bareTable, time.Now().Format("20060102_150405"))
+	// Db2 RENAME TABLE 目标侧不能带 schema（重命名后留在原 schema）
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME TABLE %s TO "%s"`, qualifyTable(tableName), escapeIdent(backupName)))
 	if err != nil {
 		return "", fmt.Errorf("IBM Db2: backup table failed: %w", err)
 	}
-	return backupName, nil
+	qualifiedBackup := tableName
+	if schemaName, _ := types.SplitQualified(tableName); schemaName != "" {
+		qualifiedBackup = schemaName + "." + backupName
+	}
+	return qualifiedBackup, nil
 }
 
 func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE "%s"`, escapeIdent(originalName)))
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s`, qualifyTable(originalName)))
 		if err != nil {
 			return fmt.Errorf("IBM Db2: drop current table during restore failed: %w", err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME TABLE "%s" TO "%s"`, escapeIdent(backupName), escapeIdent(originalName)))
+	// RENAME 目标侧用裸表名（留在原 schema）
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`RENAME TABLE %s TO "%s"`, qualifyTable(backupName), escapeIdent(qualifyBare(originalName))))
 	if err != nil {
 		return fmt.Errorf("IBM Db2: restore backup failed: %w", err)
 	}
@@ -219,7 +240,7 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 }
 
 func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE "%s"`, escapeIdent(backupName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE %s`, qualifyTable(backupName)))
 	if err != nil {
 		return fmt.Errorf("IBM Db2: drop backup table failed: %w", err)
 	}
@@ -228,8 +249,8 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`CREATE TABLE "%s" (
-`, escapeIdent(table.Name)))
+	sb.WriteString(fmt.Sprintf(`CREATE TABLE %s (
+`, qualifyTable(table.Name)))
 
 	for i, col := range table.Columns {
 		if i > 0 {
@@ -274,11 +295,15 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	}
 
 	sb.WriteString("\n)")
+	// 目标表空间（Db2: IN 子句，连接后由 SetTablespace 配置）
+	if a.tablespace != "" {
+		sb.WriteString(fmt.Sprintf(" IN \"%s\"", escapeIdent(a.tablespace)))
+	}
 	return sb.String(), nil
 }
 
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf(`DROP TABLE "%s"`, escapeIdent(tableName)), nil
+	return fmt.Sprintf(`DROP TABLE %s`, qualifyTable(tableName)), nil
 }
 
 func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit int) ([]types.Row, error) {
@@ -288,7 +313,7 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 	}
 	cols := schemaColumnNames(schema)
 	// Db2 语法: OFFSET n ROWS FETCH NEXT m ROWS ONLY（OFFSET 在 FETCH 之前）
-	query := fmt.Sprintf(`SELECT * FROM "%s" OFFSET %d ROWS FETCH FIRST %d ROWS ONLY`, escapeIdent(tableName), offset, limit)
+	query := fmt.Sprintf(`SELECT * FROM %s OFFSET %d ROWS FETCH FIRST %d ROWS ONLY`, qualifyTable(tableName), offset, limit)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -298,7 +323,7 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 		return nil, fmt.Errorf("IBM Db2: get schema failed: %w", err)
 	}
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf(`SELECT * FROM "%s"`, escapeIdent(tableName))
+	query := fmt.Sprintf(`SELECT * FROM %s`, qualifyTable(tableName))
 	var args []any
 	if lastKey != nil {
 		query += fmt.Sprintf(` WHERE "%s" > ?`, escapeIdent(keyColumn))
@@ -316,8 +341,8 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	for i := range columns {
 		placeholders[i] = "?"
 	}
-	query := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s)`,
-		escapeIdent(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
+	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
+		qualifyTable(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -503,7 +528,7 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 	}
 
 	colList := quoteIdentifiers(cols)
-	query := buildPhysicalRowIDQuery(colList, escapeIdent(tableName), lastRowID != nil)
+	query := buildPhysicalRowIDQuery(colList, qualifyTable(tableName), lastRowID != nil)
 	var args []any
 	if lastRowID != nil {
 		args = append(args, lastRowID, limit)
@@ -550,17 +575,33 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 }
 
 // buildPhysicalRowIDQuery 构建 Db2 物理行游标分页查询（纯函数，便于单测防回归）。
-// RID("表名") 返回 BIGINT 物理行标识；WHERE 游标比较与 ORDER BY 使用同一
-// 表达式 RID("表名")，保证排序语义一致；_physrowid 别名加引号，
+// RID(%s) 返回 BIGINT 物理行标识；WHERE 游标比较与 ORDER BY 使用同一
+// 表达式，保证排序语义一致；_physrowid 别名加引号，
 // 防止 Db2 将未加引号的别名转为大写导致编排器取不到游标值。
+// escapedTable 由调用方传 qualifyTable 结果（格式串只留裸 %s 占位）。
 func buildPhysicalRowIDQuery(colList, escapedTable string, hasLastRowID bool) string {
-	rid := fmt.Sprintf(`RID("%s")`, escapedTable)
+	rid := fmt.Sprintf(`RID(%s)`, escapedTable)
 	if hasLastRowID {
 		return fmt.Sprintf(
-			`SELECT %s, %s AS "_physrowid" FROM "%s" WHERE %s > ? ORDER BY %s FETCH FIRST ? ROWS ONLY`,
+			`SELECT %s, %s AS "_physrowid" FROM %s WHERE %s > ? ORDER BY %s FETCH FIRST ? ROWS ONLY`,
 			colList, rid, escapedTable, rid, rid)
 	}
 	return fmt.Sprintf(
-		`SELECT %s, %s AS "_physrowid" FROM "%s" ORDER BY %s FETCH FIRST ? ROWS ONLY`,
+		`SELECT %s, %s AS "_physrowid" FROM %s ORDER BY %s FETCH FIRST ? ROWS ONLY`,
 		colList, rid, escapedTable, rid)
+}
+
+// qualifyTable 限定表名："s.t" → "s"."t"，裸表名 → "t"
+func qualifyTable(name string) string {
+	schema, table := types.SplitQualified(name)
+	if schema == "" {
+		return `"` + escapeIdent(table) + `"`
+	}
+	return `"` + escapeIdent(schema) + `"."` + escapeIdent(table) + `"`
+}
+
+// qualifyBare 取限定名的裸表部分（供 RENAME 目标侧使用）
+func qualifyBare(name string) string {
+	_, table := types.SplitQualified(name)
+	return table
 }

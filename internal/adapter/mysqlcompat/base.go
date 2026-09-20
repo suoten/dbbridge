@@ -120,20 +120,25 @@ func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 	return tables, nil
 }
 
-// GetTableSchema 获取表结构
+// GetTableSchema 获取表结构。
+// tableName 支持 "schema.table" 限定名（Schema 映射场景由 orchestrator 传入）；
+// 未配置映射时为普通表名，行为与既往版本一致。
 func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{
 		Name: tableName,
 	}
+	schemaName, table := types.SplitQualified(tableName)
+	schemaFilter := "TABLE_SCHEMA = CASE WHEN ? = '' THEN DATABASE() ELSE ? END"
+	schemaArgs := []any{schemaName, schemaName}
 
 	// 获取表注释和引擎
 	var tableComment, engine, charset, collation sql.NullString
 	err := a.db.QueryRowContext(ctx, `
-		SELECT TABLE_COMMENT, ENGINE, TABLE_COLLATION,
-			(SELECT CHARACTER_SET_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY WHERE COLLATION_NAME = TABLE_COLLATION LIMIT 1)
-		FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-	`, tableName).Scan(&tableComment, &engine, &collation, &charset)
+SELECT TABLE_COMMENT, ENGINE, TABLE_COLLATION,
+(SELECT CHARACTER_SET_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY WHERE COLLATION_NAME = TABLE_COLLATION LIMIT 1)
+FROM information_schema.TABLES
+WHERE `+schemaFilter+` AND TABLE_NAME = ?
+`, append(schemaArgs, table)...).Scan(&tableComment, &engine, &collation, &charset)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 获取表信息失败: %w", a.brand(), err)
 	}
@@ -156,9 +161,9 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		       COLUMN_KEY, EXTRA, COLUMN_COMMENT, DATA_TYPE,
 		       CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
 		FROM information_schema.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		WHERE `+schemaFilter+` AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION
-	`, tableName)
+	`, append(schemaArgs, table)...)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询列信息失败: %w", a.brand(), err)
 	}
@@ -222,9 +227,9 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 	indexRows, err := a.db.QueryContext(ctx, `
 		SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX
 		FROM information_schema.STATISTICS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		WHERE `+schemaFilter+` AND TABLE_NAME = ?
 		ORDER BY INDEX_NAME, SEQ_IN_INDEX
-	`, tableName)
+	`, append(schemaArgs, table)...)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询索引信息失败: %w", a.brand(), err)
 	}
@@ -272,11 +277,11 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 	fkRows, err := a.db.QueryContext(ctx, `
 		SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
 		FROM information_schema.KEY_COLUMN_USAGE
-		WHERE TABLE_SCHEMA = DATABASE()
+		WHERE `+schemaFilter+`
 		AND TABLE_NAME = ?
 		AND REFERENCED_TABLE_NAME IS NOT NULL
 		ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
-	`, tableName)
+	`, append(schemaArgs, table)...)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询外键信息失败: %w", a.brand(), err)
 	}
@@ -311,7 +316,7 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 // GetRowCount 获取表的行数
 func (a *Base) GetRowCount(ctx context.Context, tableName string) (int64, error) {
 	var count int64
-	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", escapeIdent(tableName))
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", qualifyTable(tableName))
 	err := a.db.QueryRowContext(ctx, query).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("%s: 获取行数失败: %w", a.brand(), err)
@@ -319,41 +324,56 @@ func (a *Base) GetRowCount(ctx context.Context, tableName string) (int64, error)
 	return count, nil
 }
 
-// TableExists 检查表是否存在
+// TableExists 检查表是否存在（支持 "schema.table" 限定名）
 func (a *Base) TableExists(ctx context.Context, tableName string) (bool, error) {
 	var count int
-	err := a.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-	`, tableName).Scan(&count)
+	schemaName, table := types.SplitQualified(tableName)
+	var err error
+	if schemaName == "" {
+		err = a.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+		`, table).Scan(&count)
+	} else {
+		err = a.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+		`, schemaName, table).Scan(&count)
+	}
 	if err != nil {
 		return false, fmt.Errorf("%s: 检查表存在失败: %w", a.brand(), err)
 	}
 	return count > 0, nil
 }
 
-// BackupTable 将表重命名为备份表名
+// BackupTable 将表重命名为备份表名（支持 "schema.table" 限定名，
+// 备份表落在同一 Schema 下，返回限定名便于后续恢复/删除定位）
 func (a *Base) BackupTable(ctx context.Context, tableName string) (string, error) {
-	backupName := fmt.Sprintf("_bak_%s_%s", tableName, time.Now().Format("20060102_150405"))
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf("RENAME TABLE `%s` TO `%s`",
-		escapeIdent(tableName), escapeIdent(backupName)))
-	if err != nil {
-		return "", fmt.Errorf("%s: 备份表失败 (%s→%s): %w", a.brand(), tableName, backupName, err)
+	schemaName, table := types.SplitQualified(tableName)
+	backupName := fmt.Sprintf("_bak_%s_%s", table, time.Now().Format("20060102_150405"))
+	qualifiedBackup := backupName
+	if schemaName != "" {
+		qualifiedBackup = schemaName + "." + backupName
 	}
-	return backupName, nil
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("RENAME TABLE %s TO %s",
+		qualifyTable(tableName), qualifyTable(qualifiedBackup)))
+	if err != nil {
+		return "", fmt.Errorf("%s: 备份表失败 (%s→%s): %w", a.brand(), tableName, qualifiedBackup, err)
+	}
+	return qualifiedBackup, nil
 }
 
 // RestoreFromBackup 从备份表恢复（删除当前同名表，将备份表重命名回去）
 func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", escapeIdent(originalName)))
+		_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyTable(originalName)))
 		if err != nil {
 			return fmt.Errorf("%s: 恢复备份时删除当前表失败: %w", a.brand(), err)
 		}
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf("RENAME TABLE `%s` TO `%s`",
-		escapeIdent(backupName), escapeIdent(originalName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("RENAME TABLE %s TO %s",
+		qualifyTable(backupName), qualifyTable(originalName)))
 	if err != nil {
 		return fmt.Errorf("%s: 恢复备份失败 (%s→%s): %w", a.brand(), backupName, originalName, err)
 	}
@@ -362,7 +382,7 @@ func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName s
 
 // DropBackup 删除备份表
 func (a *Base) DropBackup(ctx context.Context, backupName string) error {
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS `%s`", escapeIdent(backupName)))
+	_, err := a.db.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyTable(backupName)))
 	if err != nil {
 		return fmt.Errorf("%s: 删除备份表失败: %w", a.brand(), err)
 	}
@@ -374,8 +394,8 @@ func (a *Base) DropBackup(ctx context.Context, backupName string) error {
 // 数据库静默跳过，掩盖前置的备份/删除判断失效，导致数据重复追加。
 // 表存在性由 orchestrator 通过 TableExists 显式判断并执行备份/删除/报错。
 func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
-var sb strings.Builder
-sb.WriteString(fmt.Sprintf("CREATE TABLE `%s` (\n", escapeIdent(table.Name)))
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", qualifyTable(table.Name)))
 
 	// 收集参与索引（主键/唯一/普通）的列：MySQL 键列不允许 TEXT/BLOB/JSON 无长度（Error 1170）
 	indexedCols := map[string]bool{}
@@ -508,7 +528,7 @@ sb.WriteString(fmt.Sprintf("CREATE TABLE `%s` (\n", escapeIdent(table.Name)))
 
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Base) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf("DROP TABLE IF EXISTS `%s`", escapeIdent(tableName)), nil
+	return fmt.Sprintf("DROP TABLE IF EXISTS %s", qualifyTable(tableName)), nil
 }
 
 // ReadData 按偏移量分页读取数据
@@ -519,7 +539,7 @@ func (a *Base) ReadData(ctx context.Context, tableName string, offset, limit int
 	}
 
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf("SELECT * FROM `%s` LIMIT %d OFFSET %d", escapeIdent(tableName), limit, offset)
+	query := fmt.Sprintf("SELECT * FROM %s LIMIT %d OFFSET %d", qualifyTable(tableName), limit, offset)
 	return a.scanRows(ctx, query, nil, cols)
 }
 
@@ -531,7 +551,7 @@ func (a *Base) ReadDataKeyset(ctx context.Context, tableName, keyColumn string, 
 	}
 
 	cols := schemaColumnNames(schema)
-	query := fmt.Sprintf("SELECT * FROM `%s`", escapeIdent(tableName))
+	query := fmt.Sprintf("SELECT * FROM %s", qualifyTable(tableName))
 	args := []any{}
 	if lastKey != nil {
 		query += fmt.Sprintf(" WHERE `%s` > ?", escapeIdent(keyColumn))
@@ -553,8 +573,8 @@ func (a *Base) WriteData(ctx context.Context, tableName string, columns []string
 	}
 
 	query := fmt.Sprintf(
-		"INSERT INTO `%s` (%s) VALUES (%s)",
-		escapeIdent(tableName),
+		"INSERT INTO %s (%s) VALUES (%s)",
+		qualifyTable(tableName),
 		quoteIdentifiers(columns),
 		strings.Join(placeholders, ", "),
 	)
@@ -765,15 +785,15 @@ func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMet
 		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("ALTER TABLE `%s` ADD CONSTRAINT `%s` FOREIGN KEY (",
-		escapeIdent(tableName), escapeIdent(fkName)))
+	sb.WriteString(fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT `%s` FOREIGN KEY (",
+		qualifyTable(tableName), escapeIdent(fkName)))
 	for i, c := range fk.Columns {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
 		sb.WriteString(fmt.Sprintf("`%s`", escapeIdent(c)))
 	}
-	sb.WriteString(fmt.Sprintf(") REFERENCES `%s` (", escapeIdent(fk.RefTable)))
+	sb.WriteString(fmt.Sprintf(") REFERENCES %s (", qualifyTable(fk.RefTable)))
 	for i, c := range fk.RefColumns {
 		if i > 0 {
 			sb.WriteString(", ")
@@ -791,6 +811,16 @@ func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMet
 }
 
 // escapeIdent 转义 MySQL 标识符，防止 SQL 注入
+// qualifyTable 生成反引号包裹的表名片段，支持 "schema.table" 限定名
+// （Schema 映射场景由 orchestrator 传入；未配置映射时为普通表名）
+func qualifyTable(name string) string {
+	schema, table := types.SplitQualified(name)
+	if schema == "" {
+		return "`" + escapeIdent(table) + "`"
+	}
+	return "`" + escapeIdent(schema) + "`.`" + escapeIdent(table) + "`"
+}
+
 func escapeIdent(name string) string {
 	return strings.ReplaceAll(name, "`", "``")
 }
@@ -825,17 +855,17 @@ func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, la
 		query = fmt.Sprintf(
 			"WITH numbered AS ("+
 				"SELECT %s, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn "+
-				"FROM `%s`"+
-			") SELECT *, rn AS _physrowid FROM numbered WHERE rn > ? ORDER BY rn LIMIT ?",
-			colList, escapeIdent(tableName))
+				"FROM %s"+
+				") SELECT *, rn AS _physrowid FROM numbered WHERE rn > ? ORDER BY rn LIMIT ?",
+			colList, qualifyTable(tableName))
 		args = append(args, lastRowID, limit)
 	} else {
 		query = fmt.Sprintf(
 			"WITH numbered AS ("+
 				"SELECT %s, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS rn "+
-				"FROM `%s`"+
-			") SELECT *, rn AS _physrowid FROM numbered ORDER BY rn LIMIT ?",
-			colList, escapeIdent(tableName))
+				"FROM %s"+
+				") SELECT *, rn AS _physrowid FROM numbered ORDER BY rn LIMIT ?",
+			colList, qualifyTable(tableName))
 		args = append(args, limit)
 	}
 
