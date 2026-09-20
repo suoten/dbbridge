@@ -39,6 +39,21 @@ type Base struct {
 	noComments bool
 	binaryType string
 	tablespace string // 目标表空间（可选，CREATE TABLE 时追加 TABLESPACE 子句）
+	runSuffix  string // 本次运行唯一后缀（索引命名去重，见 types.RunSuffixAware）
+}
+
+// SetRunSuffix 注入本次运行唯一后缀（PG 索引名 schema 级唯一，
+// 备份表会携带旧索引名存活，重跑迁移需去重）
+func (a *Base) SetRunSuffix(suffix string) {
+	a.runSuffix = suffix
+}
+
+// runIndexName 为索引名追加运行后缀（未注入后缀时原样返回）
+func (a *Base) runIndexName(name string) string {
+	if a.runSuffix == "" {
+		return name
+	}
+	return name + "_" + a.runSuffix
 }
 
 // New 创建基座实例
@@ -568,9 +583,9 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		}
 		sb.WriteString(";\n")
 		if idx.IsUnique {
-			sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX \"%s\" ON %s (", escapeIdent(idx.Name), qualifyTable(table.Name)))
+			sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX \"%s\" ON %s (", escapeIdent(a.runIndexName(idx.Name)), qualifyTable(table.Name)))
 		} else {
-			sb.WriteString(fmt.Sprintf("CREATE INDEX \"%s\" ON %s (", escapeIdent(idx.Name), qualifyTable(table.Name)))
+			sb.WriteString(fmt.Sprintf("CREATE INDEX \"%s\" ON %s (", escapeIdent(a.runIndexName(idx.Name)), qualifyTable(table.Name)))
 		}
 		for i, c := range idx.Columns {
 			if i > 0 {

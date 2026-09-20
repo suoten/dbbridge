@@ -6,6 +6,7 @@ package mssql
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -26,12 +27,26 @@ type Adapter struct {
 	db *sql.DB
 
 	tablespace string // 目标文件组（可选，CREATE TABLE 时追加 ON 子句）
+	runSuffix  string // 本次运行唯一后缀（约束/索引命名去重，见 types.RunSuffixAware）
 }
 
 // SetTablespace 设置目标文件组（TablespaceAware 接口）
 func (a *Adapter) SetTablespace(tablespace string) error {
 	a.tablespace = tablespace
 	return nil
+}
+
+// SetRunSuffix 注入本次运行唯一后缀（备份表会携带旧约束名存活，命名需去重）
+func (a *Adapter) SetRunSuffix(suffix string) {
+	a.runSuffix = suffix
+}
+
+// runName 为约束/索引对象名追加运行后缀（未注入后缀时原样返回）
+func (a *Adapter) runName(name string) string {
+	if a.runSuffix == "" {
+		return name
+	}
+	return name + "_" + a.runSuffix
 }
 
 // qualifyTable 生成方括号包裹的表名片段，支持 "schema.table" 限定名
@@ -518,11 +533,12 @@ func (a *Adapter) BackupTable(ctx context.Context, tableName string) (string, er
 	if schemaName != "" {
 		qualifiedBackup = schemaName + "." + backupName
 	}
-	// sp_rename 参数是字符串字面量，内层用方括号包裹标识符（escapeIdent 已双写 ]）。
-	// 注意必须用 bracketQualified 逐段限定：'[ods].[orders]' 是 schema 限定，
-	// 而 '[ods.orders]' 是带点号的单个标识符，会静默找不到对象或改错对象。
+	// sp_rename @objname 是字符串字面量（内层方括号逐段限定），
+	// 而 @newname 必须是【裸名】——带方括号会把括号当成名字的一部分
+	// （真实库实测：备份表名变成字面 [_bak_xxx]，旧版本一直如此）
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("EXEC sp_rename '%s', '[%s]'", bracketQualified(tableName), escapeIdent(backupName)))
+		fmt.Sprintf("EXEC sp_rename '%s', '%s'",
+			bracketQualified(tableName), strings.ReplaceAll(backupName, "'", "''")))
 	if err != nil {
 		return "", fmt.Errorf("MSSQL: 备份表失败 (%s→%s): %w", tableName, qualifiedBackup, err)
 	}
@@ -539,8 +555,10 @@ func (a *Adapter) RestoreFromBackup(ctx context.Context, backupName, originalNam
 			return fmt.Errorf("MSSQL: 恢复备份时删除当前表失败: %w", err)
 		}
 	}
+	// @newname 必须裸名（不能带方括号/schema），重命名后留在原 schema
 	_, err := a.db.ExecContext(ctx,
-		fmt.Sprintf("EXEC sp_rename '%s', '[%s]'", bracketQualified(backupName), escapeIdent(qualifyBare(originalName))))
+		fmt.Sprintf("EXEC sp_rename '%s', '%s'",
+			bracketQualified(backupName), strings.ReplaceAll(qualifyBare(originalName), "'", "''")))
 	if err != nil {
 		return fmt.Errorf("MSSQL: 恢复备份失败 (%s→%s): %w", backupName, originalName, err)
 	}
@@ -616,7 +634,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	}
 	if len(pkCols) > 0 {
 		sb.WriteString(",\n  CONSTRAINT [PK_")
-		sb.WriteString(escapeIdent(qualifyBare(table.Name)))
+		sb.WriteString(escapeIdent(a.runName(qualifyBare(table.Name))))
 		sb.WriteString("] PRIMARY KEY (")
 		for i, c := range pkCols {
 			if i > 0 {
@@ -630,10 +648,8 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	// 外键
 	for _, fk := range table.ForeignKeys {
 		sb.WriteString(",\n")
-		fkName := fk.Name
-		if fkName == "" {
-			fkName = fmt.Sprintf("FK_%s_%s", table.Name, fk.RefTable)
-		}
+		// MSSQL 约束名 schema 级唯一：备份表会携带旧名存活，必须随机后缀去重
+		fkName := uniqueFKName(fk.Name, table.Name, fk.RefTable)
 		sb.WriteString(fmt.Sprintf("  CONSTRAINT [%s] FOREIGN KEY (", escapeIdent(fkName)))
 		for i, c := range fk.Columns {
 			if i > 0 {
@@ -660,7 +676,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	// CHECK 约束
 	for _, ck := range table.Checks {
 		sb.WriteString(",\n")
-		sb.WriteString(fmt.Sprintf("  CONSTRAINT [%s] CHECK %s", escapeIdent(ck.Name), ck.Definition))
+		sb.WriteString(fmt.Sprintf("  CONSTRAINT [%s] CHECK %s", escapeIdent(a.runName(ck.Name)), ck.Definition))
 	}
 
 	sb.WriteString("\n)")
@@ -961,6 +977,22 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	return result, nil
 }
 
+// uniqueFKName 生成 schema 级唯一的外键约束名（与 mysqlcompat 同理，双写避免跨包耦合）
+func uniqueFKName(sourceName, tableName, refTable string) string {
+	base := sourceName
+	if base == "" {
+		_, bareTable := types.SplitQualified(tableName)
+		_, bareRef := types.SplitQualified(refTable)
+		base = fmt.Sprintf("FK_%s_%s", bareTable, bareRef)
+	}
+	if len(base) > 50 {
+		base = base[:50]
+	}
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%s_%x", base, b)
+}
+
 func schemaColumnNames(schema types.TableSchema) []string {
 	var cols []string
 	for _, c := range schema.Columns {
@@ -970,11 +1002,10 @@ func schemaColumnNames(schema types.TableSchema) []string {
 }
 
 // GenerateAddForeignKeyDDL 生成 "ALTER TABLE ... ADD CONSTRAINT ..."（外键延后添加用）
+// 注意：MSSQL 约束对象名在【schema 级】唯一（备份表 RENAME 后仍携带旧约束名存活），
+// 重跑迁移若沿用源库约束名会重名冲突，必须加随机后缀。
 func (a *Adapter) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMeta) (string, error) {
-	fkName := fk.Name
-	if fkName == "" {
-		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
-	}
+	fkName := uniqueFKName(fk.Name, tableName, fk.RefTable)
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT [%s] FOREIGN KEY (",
 		qualifyTable(tableName), escapeIdent(fkName)))

@@ -6,6 +6,7 @@ package mysqlcompat
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -777,13 +778,30 @@ func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types
 	}
 }
 
-// GenerateAddForeignKeyDDL 生成 "ALTER TABLE ... ADD CONSTRAINT ..."（外键延后添加用）。
-// 之前 MySQL 目标库直接丢弃源库外键（保真度丢失）；启用延后添加后外键得以完整迁移。
-func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMeta) (string, error) {
-	fkName := fk.Name
-	if fkName == "" {
-		fkName = fmt.Sprintf("FK_%s_%s", tableName, fk.RefTable)
+// uniqueFKName 生成库级唯一的外键约束名。
+// MySQL 约束名作用域是整个库：迁移前备份会把旧表（连同旧约束名）
+// 重命名留在同库，重跑迁移若沿用源库约束名必然 Error 1826 重名。
+// 保留源名前缀（可追溯），追加 4 字节随机后缀；基础名超长截断（限 64）。
+func uniqueFKName(sourceName, tableName, refTable string) string {
+	base := sourceName
+	if base == "" {
+		_, bareTable := types.SplitQualified(tableName)
+		_, bareRef := types.SplitQualified(refTable)
+		base = fmt.Sprintf("FK_%s_%s", bareTable, bareRef)
 	}
+	if len(base) > 50 {
+		base = base[:50]
+	}
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%s_%x", base, b)
+}
+
+// 之前 MySQL 目标库直接丢弃源库外键（保真度丢失）；启用延后添加后外键得以完整迁移。
+// 注意：MySQL 外键约束名在【库级】唯一（备份表 RENAME 后仍携带旧约束名存活），
+// 因此必须加随机后缀避免重跑迁移时 Error 1826 重名冲突。
+func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMeta) (string, error) {
+	fkName := uniqueFKName(fk.Name, tableName, fk.RefTable)
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT `%s` FOREIGN KEY (",
 		qualifyTable(tableName), escapeIdent(fkName)))

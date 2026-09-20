@@ -151,6 +151,15 @@ type TablespaceAware interface {
 	SetTablespace(tablespace string) error
 }
 
+// RunSuffixAware 支持注入本次迁移运行唯一后缀的适配器接口。
+// 背景：MSSQL 约束/索引对象名在 schema 级唯一，先删后建/备份模式的
+// 备份表（RENAME 而来）会携带旧约束名存活，重跑迁移建同名约束必然
+// 冲突（真实库实测 Error 2714）。orchestrator 在备份/先删后建模式下
+// 注入每次运行唯一的后缀，建表时 PK/CHECK/索引命名追加该后缀去重。
+type RunSuffixAware interface {
+	SetRunSuffix(suffix string)
+}
+
 // SplitQualified 将可能带 Schema 限定的表名拆分为 (schema, table)。
 // "a.b" -> ("a", "b")；"b" -> ("", "b")。
 // 约定：orchestrator 仅在配置了 Schema 映射时才生成限定名；

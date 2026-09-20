@@ -1,4 +1,4 @@
-﻿// Package tdengine 注册 TDengine 适配器（国产开源物联网时序数据库）。
+// Package tdengine 注册 TDengine 适配器（国产开源物联网时序数据库）。
 //
 // TDengine 是面向物联网大数据平台设计的时序数据库，使用 SQL-like 语法。
 // 本适配器将 TDengine 的超级表(STable)/子表映射为"表"，标签和列映射为"列"。

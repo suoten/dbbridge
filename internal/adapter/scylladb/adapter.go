@@ -1,4 +1,4 @@
-﻿// Package scylladb 注册 ScyllaDB 适配器（兼容 CQL，与 Cassandra 共用协议）。
+// Package scylladb 注册 ScyllaDB 适配器（兼容 CQL，与 Cassandra 共用协议）。
 // ScyllaDB 与 Cassandra 协议完全兼容，直接复用 CQL 驱动。
 // 由于 Cassandra 适配器的字段未导出，ScyllaDB 使用独立实现（品牌名不同）。
 package scylladb

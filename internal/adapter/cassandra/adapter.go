@@ -1,4 +1,4 @@
-﻿// Package cassandra 注册 Cassandra 适配器（NoSQL 列族数据库）。
+// Package cassandra 注册 Cassandra 适配器（NoSQL 列族数据库）。
 //
 // Cassandra 是高可用分布式列族数据库，使用 CQL（Cassandra Query Language）。
 // 本适配器将 Cassandra 的 table 映射为关系型表，列族字段映射为列。
@@ -267,8 +267,8 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-// 禁止 IF NOT EXISTS：表已存在时静默跳过会掩盖前置判断失效导致数据重复
-sb.WriteString(fmt.Sprintf(`CREATE TABLE "%s" (
+	// 禁止 IF NOT EXISTS：表已存在时静默跳过会掩盖前置判断失效导致数据重复
+	sb.WriteString(fmt.Sprintf(`CREATE TABLE "%s" (
 `, escapeIdent(table.Name)))
 
 	for i, col := range table.Columns {

@@ -133,6 +133,89 @@ func (o *Orchestrator) resolveTargetName(sourceTable string) string {
 	return sourceTable
 }
 
+// dependencyLayers 计算 DataOnly 模式的写入分层（Kahn 拓扑分层）。
+// 背景：目标表已存在且携带外键时（DataOnly 语义），并行写数据没有表间
+// 顺序保证，子表数据先于父表落库会触发目标库外键违反。按源表外键依赖
+// 分层：同层并行、层间串行（父层全部写完才派发子层）。
+// 仅统计引用目标在本次迁移集内的依赖；自引用忽略；FK 查询失败或无依赖
+// 时返回 nil（退化为单层全并行，行为与旧版一致）。
+func (o *Orchestrator) dependencyLayers(ctx context.Context, tables []string) [][]indexedTable {
+	n := len(tables)
+	if n == 0 {
+		return nil
+	}
+	index := make(map[string]int, n)
+	for i, name := range tables {
+		_, bare := types.SplitQualified(name)
+		index[bare] = i
+	}
+
+	parents := make([]map[int]bool, n)
+	for i := range parents {
+		parents[i] = map[int]bool{}
+	}
+	edges := 0
+	for i, name := range tables {
+		schema, err := o.sourceAdapter.GetTableSchema(ctx, name)
+		if err != nil {
+			o.log("WARN", name, fmt.Sprintf("DataOnly 依赖分层读取外键失败，该表按无依赖并行: %v", err))
+			return nil
+		}
+		for _, fk := range schema.ForeignKeys {
+			parentTarget := o.resolveTargetName(fk.RefTable)
+			_, bare := types.SplitQualified(parentTarget)
+			if j, ok := index[bare]; ok && j != i {
+				parents[i][j] = true
+				edges++
+			}
+		}
+	}
+	if edges == 0 {
+		return nil
+	}
+
+	done := make([]bool, n)
+	placed := 0
+	var layers [][]indexedTable
+	for placed < n {
+		var cur []indexedTable
+		for i := 0; i < n; i++ {
+			if done[i] {
+				continue
+			}
+			ready := true
+			for p := range parents[i] {
+				if !done[p] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				cur = append(cur, indexedTable{index: i, name: tables[i], target: o.resolveTargetName(tables[i])})
+			}
+		}
+		if len(cur) == 0 {
+			// 理论上外键图无环（自引用已忽略）；防御性兜底：剩余表一次性并行
+			o.log("WARN", "", "表间依赖存在环，剩余表按并行处理")
+			for i := 0; i < n; i++ {
+				if !done[i] {
+					cur = append(cur, indexedTable{index: i, name: tables[i], target: o.resolveTargetName(tables[i])})
+					done[i] = true
+					placed++
+				}
+			}
+			layers = append(layers, cur)
+			break
+		}
+		layers = append(layers, cur)
+		for _, t := range cur {
+			done[t.index] = true
+			placed++
+		}
+	}
+	return layers
+}
+
 // pendingFK 待补建的外键
 type pendingFK struct {
 	table string
@@ -358,6 +441,16 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		}
 	}
 
+	// 运行后缀：先删后建/备份模式下，备份表（RENAME 而来）会携带旧约束名/
+	// 索引名存活，而 MSSQL 约束/索引名 schema 级唯一、PG 索引名 schema 级
+	// 唯一，重跑迁移建同名对象必冲突（真实库实测 Error 2714）。
+	// 注入每次运行唯一的后缀，适配器在建表时对 PK/CHECK/索引命名去重。
+	if o.config.BackupBefore || o.config.DropIfExists {
+		if rs, ok := o.targetAdapter.(types.RunSuffixAware); ok {
+			rs.SetRunSuffix(fmt.Sprintf("%x", time.Now().UnixNano()%1_000_000_00))
+		}
+	}
+
 	// 2. 获取表列表
 	var tables []string
 	if len(o.config.Tables) > 0 {
@@ -377,9 +470,47 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 	o.mu.Unlock()
 	o.log("INFO", "", fmt.Sprintf("待迁移表数: %d, 并发数: %d", len(tables), o.workerCount()))
 
+	// 先删后建：按依赖逆序（子表先删）预删除目标表。
+	// 并行乱序删除会被子表外键阻塞（PG 2BP01 / MySQL 3730 / MSSQL 3726），
+	// 真实库集成测试实测：orders.user_id → users.id 时先删 users 必败。
+	// 预删后 migrateTable 的同名检测自然走建表分支。
+	if o.config.DropIfExists && !o.config.DataOnly && len(tables) > 1 {
+		order := tables
+		if layers := o.dependencyLayers(runCtx, tables); len(layers) > 0 {
+			order = nil
+			for i := len(layers) - 1; i >= 0; i-- {
+				for _, t := range layers[i] {
+					order = append(order, t.name)
+				}
+			}
+		}
+		o.log("INFO", "", fmt.Sprintf("先删后建：按依赖逆序预删除目标表（%d 张）", len(order)))
+		for _, name := range order {
+			target := o.resolveTargetName(name)
+			exists, err := o.targetAdapter.TableExists(runCtx, target)
+			if err != nil {
+				return report, fmt.Errorf("检查目标表 %s 失败: %w", target, err)
+			}
+			if !exists {
+				continue
+			}
+			dropDDL, err := o.targetAdapter.GenerateDropTableDDL(target)
+			if err != nil {
+				return report, fmt.Errorf("生成删除 %s 的 DDL 失败: %w", target, err)
+			}
+			if err := o.targetAdapter.ExecContext(runCtx, dropDDL); err != nil {
+				return report, fmt.Errorf("预删除目标表 %s 失败: %w", target, err)
+			}
+			o.log("INFO", name, fmt.Sprintf("已预删除目标表: %s", target))
+		}
+	}
+
 	// 3. 并发迁移（worker pool）
 	workers := o.workerCount()
 	tableCh := make(chan indexedTable)
+	// layerDone：worker 每完成一个任务发出一次信号，供 DataOnly
+	// 依赖分层派发器做层间同步（父层全部写完才派发子层）
+	layerDone := make(chan struct{}, len(tables)+1)
 	var wg sync.WaitGroup
 	var firstErr error // 触发快速中止的首个错误（fail-fast 模式下）
 
@@ -436,8 +567,12 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 					}
 					o.mu.Unlock()
 					runCancel()
-					return
+					// 用 continue 而非 return：保证 layerDone 计数不丢（派发器层间同步依赖它）
+					// 下一轮循环顶部 runCtx.Err() 检查会使 worker 自然退出
+					layerDone <- struct{}{}
+					continue
 				}
+				layerDone <- struct{}{}
 			}
 		}()
 	}
@@ -445,6 +580,33 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 	// 派发任务（在独立 goroutine 中，取消时退出派发，解除 worker 阻塞）
 	go func() {
 		defer close(tableCh)
+		// DataOnly 模式：目标表已存在且可能携带外键，并行写数据没有表间
+		// 顺序保证，子表数据先于父表落库会触发目标库外键违反（MySQL 1452 /
+		// PG 23503，真实库集成测试实测）。按外键依赖分层：同层并行、层间串行。
+		if o.config.DataOnly {
+			if layers := o.dependencyLayers(runCtx, tables); len(layers) > 0 {
+				if len(layers) > 1 {
+					o.log("INFO", "", fmt.Sprintf("DataOnly 外键依赖分层: %d 层（父层写完再写子层，避免目标外键违反）", len(layers)))
+				}
+				for _, layer := range layers {
+					for _, t := range layer {
+						select {
+						case tableCh <- t:
+						case <-runCtx.Done():
+							return
+						}
+					}
+					for i := 0; i < len(layer); i++ {
+						select {
+						case <-layerDone:
+						case <-runCtx.Done():
+							return
+						}
+					}
+				}
+				return
+			}
+		}
 		for i, name := range tables {
 			select {
 			case tableCh <- indexedTable{index: i, name: name, target: o.resolveTargetName(name)}:

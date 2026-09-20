@@ -117,17 +117,17 @@ var kindAliases = map[string]Kind{
 	"GUID":             KindUUID,
 
 	// Access (Jet/ACE) 专有类型
-	"COUNTER":         KindInt,       // Access 自增整型（等同于 AUTOINCREMENT / IDENTITY）
-	"AUTOINCREMENT":   KindInt,       // Access 自增整型别名
-	"IDENTITY":        KindInt,       // Access 自增整型别名
-	"YESNO":           KindBool,      // Access 是/否类型
-	"BYTE":            KindTinyInt,   // Access 字节类型
-	"MEMO":            KindText,      // Access 备注字段
-	"LONGCHAR":        KindText,      // Access 备注字段别名
-	"SINGLE":          KindFloat,     // Access 单精度
-	"CURRENCY":        KindDecimal,   // Access 货币类型
-	"OLEOBJECT":       KindBlob,      // Access OLE 对象字段
-	"LONGBINARY":      KindBlob,      // Access 长二进制
+	"COUNTER":       KindInt,     // Access 自增整型（等同于 AUTOINCREMENT / IDENTITY）
+	"AUTOINCREMENT": KindInt,     // Access 自增整型别名
+	"IDENTITY":      KindInt,     // Access 自增整型别名
+	"YESNO":         KindBool,    // Access 是/否类型
+	"BYTE":          KindTinyInt, // Access 字节类型
+	"MEMO":          KindText,    // Access 备注字段
+	"LONGCHAR":      KindText,    // Access 备注字段别名
+	"SINGLE":        KindFloat,   // Access 单精度
+	"CURRENCY":      KindDecimal, // Access 货币类型
+	"OLEOBJECT":     KindBlob,    // Access OLE 对象字段
+	"LONGBINARY":    KindBlob,    // Access 长二进制
 }
 
 // Normalize 将源方言的基础类型名归一化为中立类型。
