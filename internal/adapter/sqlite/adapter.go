@@ -395,9 +395,11 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 }
 
 // GenerateCreateTableDDL 生成建表 SQL（类型经 typeconv 映射，支持异构迁移）
+// 注意：禁止使用 CREATE TABLE IF NOT EXISTS —— 目标表已存在时建表会被
+// 静默跳过，掩盖前置的备份/删除判断失效，导致数据重复追加。
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", escapeIdent(table.Name)))
+	sb.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", escapeIdent(table.Name)))
 
 	for i, col := range table.Columns {
 		if i > 0 {

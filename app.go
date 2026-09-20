@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"time"
 
 	// 导入适配器包，触发 init() 自动注册
@@ -247,6 +251,31 @@ func (a *App) CancelMigration() bool {
 		wailsRuntime.LogInfo(a.ctx, "用户取消了迁移任务")
 	}
 	return cancelled
+}
+
+// OpenInFolder 在系统文件管理器中打开并选中指定文件（用于跳转迁移日志文件）。
+// 支持跨平台；打开失败返回 SimpleResult{Success:false, Error:...}。
+func (a *App) OpenInFolder(path string) SimpleResult {
+	if path == "" {
+		return SimpleResult{Success: false, Error: "路径为空"}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return SimpleResult{Success: false, Error: "文件不存在: " + path}
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer", "/select,", path)
+	case "darwin":
+		cmd = exec.Command("open", "-R", path)
+	default:
+		// Linux 无统一"选中"机制，退化为打开所在目录
+		cmd = exec.Command("xdg-open", filepath.Dir(path))
+	}
+	if err := cmd.Start(); err != nil {
+		return SimpleResult{Success: false, Error: err.Error()}
+	}
+	return SimpleResult{Success: true}
 }
 
 // saveHistory 保存迁移历史到本地

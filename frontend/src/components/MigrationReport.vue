@@ -1,4 +1,5 @@
 <script lang="ts" setup>
+import { ref } from 'vue'
 import {
   CheckCircle2,
   XCircle,
@@ -13,6 +14,9 @@ import {
   ShieldCheck,
   Zap,
   Code2,
+  FileText,
+  FolderOpen,
+  Copy,
 } from '@lucide/vue'
 
 interface TableReport {
@@ -48,6 +52,7 @@ interface MigrationReport {
   routinesMigrated?: number
   triggerErrors?: string[]
   routineErrors?: string[]
+  logFile?: string
 }
 
 defineProps<{
@@ -56,6 +61,28 @@ defineProps<{
 
 function formatNumber(n: number): string {
   return n.toLocaleString()
+}
+
+// 在文件管理器中打开日志文件所在目录（调用后端 OpenInFolder）
+async function openLogFile(path: string) {
+  try {
+    // @ts-ignore - Wails binding
+    await window.go.main.App.OpenInFolder(path)
+  } catch {
+    // 打开失败时用户仍可手动复制路径
+  }
+}
+
+// 复制日志文件路径
+const pathCopied = ref(false)
+async function copyLogPath(path: string) {
+  try {
+    await navigator.clipboard.writeText(path)
+    pathCopied.value = true
+    setTimeout(() => { pathCopied.value = false }, 2000)
+  } catch {
+    // 剪贴板权限拒绝时静默失败
+  }
 }
 
 const statusConfig: Record<string, { label: string; icon: any; color: string; bg: string }> = {
@@ -120,6 +147,22 @@ function getStatus(s: string) {
           <span class="summary-label">备份表</span>
         </div>
       </div>
+    </div>
+
+    <!-- ====== Local Log File ====== -->
+    <div class="logfile-bar" v-if="report.logFile">
+      <FileText :size="14" />
+      <span class="logfile-label">完整日志已保存：</span>
+      <span class="logfile-path" :title="report.logFile">{{ report.logFile }}</span>
+      <button class="btn btn-ghost btn-sm" @click="openLogFile(report.logFile)" title="打开日志所在文件夹">
+        <FolderOpen :size="13" />
+        打开位置
+      </button>
+      <button class="btn btn-ghost btn-sm" @click="copyLogPath(report.logFile)" title="复制日志文件路径">
+        <Check :size="13" v-if="pathCopied" />
+        <Copy :size="13" v-else />
+        {{ pathCopied ? '已复制' : '复制路径' }}
+      </button>
     </div>
 
     <!-- ====== Table Details ====== -->
@@ -291,6 +334,34 @@ function getStatus(s: string) {
   font-size: 11px;
   color: var(--color-text-secondary);
   margin-top: 2px;
+}
+
+/* ====== Local Log File ====== */
+.logfile-bar {
+display: flex;
+align-items: center;
+gap: 8px;
+padding: 10px 16px;
+background: var(--color-surface);
+border-radius: var(--radius-lg);
+border: 1px solid var(--color-border);
+color: var(--color-text-secondary);
+font-size: 13px;
+}
+
+.logfile-label {
+flex-shrink: 0;
+}
+
+.logfile-path {
+flex: 1;
+min-width: 0;
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+font-family: var(--font-mono);
+font-size: 12px;
+color: var(--color-text);
 }
 
 /* ====== Details ====== */

@@ -267,7 +267,8 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(`CREATE TABLE IF NOT EXISTS "%s" (
+// 禁止 IF NOT EXISTS：表已存在时静默跳过会掩盖前置判断失效导致数据重复
+sb.WriteString(fmt.Sprintf(`CREATE TABLE "%s" (
 `, escapeIdent(table.Name)))
 
 	for i, col := range table.Columns {

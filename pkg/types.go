@@ -183,9 +183,10 @@ type LogEntry struct {
 
 // MigrationReport 迁移报告
 type MigrationReport struct {
-	StartTime        string        `json:"startTime"`
-	EndTime          string        `json:"endTime"`
-	Duration         string        `json:"duration"`
+StartTime        string        `json:"startTime"`
+EndTime          string        `json:"endTime"`
+Duration         string        `json:"duration"`
+LogFile          string        `json:"logFile,omitempty"` // 本次迁移完整日志的本地文件路径
 	TablesTotal      int           `json:"tablesTotal"`
 	TablesSuccess    int           `json:"tablesSuccess"`
 	TablesFailed     int           `json:"tablesFailed"`

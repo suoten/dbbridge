@@ -13,6 +13,8 @@ import {
   AlertTriangle,
   XCircle,
   Ban,
+  Copy,
+  Check,
 } from '@lucide/vue'
 
 interface ProgressInfo {
@@ -89,6 +91,42 @@ function clearLogs() {
   logs.value = []
   progress.value = null
   cancelling.value = false
+}
+
+// 复制状态提示：copiedKey 为 'all'（复制全部）或日志条目索引，2 秒后自动复位
+const copiedKey = ref<string | number | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | null = null
+
+function markCopied(key: string | number) {
+  copiedKey.value = key
+  if (copiedTimer) clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => { copiedKey.value = null }, 2000)
+}
+
+function formatEntry(entry: LogEntry): string {
+  const table = entry.table ? `[${entry.table}] ` : ''
+  return `${entry.time} [${entry.level}] ${table}${entry.message}`
+}
+
+// 复制单条日志（长错误信息不再依赖悬停，点击即可复制到剪贴板）
+async function copyEntry(entry: LogEntry, i: number) {
+  try {
+    await navigator.clipboard.writeText(formatEntry(entry))
+    markCopied(i)
+  } catch {
+    // 剪贴板权限拒绝时静默失败，不影响主流程
+  }
+}
+
+// 复制全部日志（含被界面 MAX_LOGS 截断前的所有已接收条目）
+async function copyAllLogs() {
+  try {
+    const text = logs.value.map(formatEntry).join('\n')
+    await navigator.clipboard.writeText(text)
+    markCopied('all')
+  } catch {
+    // 同上
+  }
 }
 
 // 取消当前迁移任务（后端通过 context 中断所有进行中的查询）
@@ -237,28 +275,38 @@ function logColor(level: string): string {
     <!-- ====== Log Section ====== -->
     <div class="log-section card">
       <div class="log-header">
-        <div class="log-title">
-          <Terminal :size="16" />
-          <span>迁移日志</span>
-          <span class="log-count" v-if="logs.length > 0">{{ logs.length }} 条</span>
-        </div>
-        <button class="btn btn-ghost btn-sm" @click="clearLogs" v-if="logs.length > 0">
-          <Trash2 :size="13" />
-          清空
-        </button>
+<div class="log-title">
+<Terminal :size="16" />
+<span>迁移日志</span>
+<span class="log-count" v-if="logs.length > 0">{{ logs.length }} 条</span>
+</div>
+<div class="log-actions">
+<button class="btn btn-ghost btn-sm" @click="copyAllLogs" v-if="logs.length > 0" :title="'复制全部日志到剪贴板'">
+<Check :size="13" v-if="copiedKey === 'all'" />
+<Copy :size="13" v-else />
+{{ copiedKey === 'all' ? '已复制' : '复制全部' }}
+</button>
+<button class="btn btn-ghost btn-sm" @click="clearLogs" v-if="logs.length > 0">
+<Trash2 :size="13" />
+清空
+</button>
+</div>
       </div>
       <div class="log-container" ref="logContainer">
-        <div
-          v-for="(entry, i) in logs"
-          :key="i"
-          class="log-entry"
-          :class="entry.level.toLowerCase()"
-        >
-          <component :is="logIcon(entry.level)" :size="13" class="log-icon" :style="{ color: logColor(entry.level) }" />
-          <span class="log-time">{{ entry.time }}</span>
-          <span v-if="entry.table" class="log-table">[{{ entry.table }}]</span>
-          <span class="log-message">{{ entry.message }}</span>
-        </div>
+<div
+v-for="(entry, i) in logs"
+:key="i"
+class="log-entry"
+:class="entry.level.toLowerCase()"
+:title="'点击复制这条日志'"
+@click="copyEntry(entry, i)"
+>
+<component :is="logIcon(entry.level)" :size="13" class="log-icon" :style="{ color: logColor(entry.level) }" />
+<span class="log-time">{{ entry.time }}</span>
+<span v-if="entry.table" class="log-table">[{{ entry.table }}]</span>
+<span class="log-message">{{ entry.message }}</span>
+<Check :size="13" v-if="copiedKey === i" class="log-copied" />
+</div>
         <div v-if="logs.length === 0" class="log-empty">
           <Terminal :size="28" class="empty-icon" />
           <p>暂无日志</p>
@@ -448,12 +496,18 @@ function logColor(level: string): string {
 }
 
 .log-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
+display: flex;
+justify-content: space-between;
+align-items: center;
+padding: 10px 16px;
+border-bottom: 1px solid var(--color-border);
+flex-shrink: 0;
+}
+
+.log-actions {
+display: flex;
+gap: 6px;
+align-items: center;
 }
 
 .log-title {
@@ -483,11 +537,24 @@ function logColor(level: string): string {
 }
 
 .log-entry {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  white-space: nowrap;
-  padding: 1px 0;
+display: flex;
+align-items: flex-start;
+gap: 6px;
+white-space: pre-wrap; /* 长错误信息换行完整显示，不再依赖悬停 */
+word-break: break-all;
+padding: 1px 0;
+cursor: pointer;
+border-radius: 3px;
+}
+
+.log-entry:hover {
+background: var(--color-bg-hover, rgba(128, 128, 128, 0.1));
+}
+
+.log-copied {
+color: var(--color-success, #10b981);
+flex-shrink: 0;
+align-self: center;
 }
 
 .log-icon {
@@ -506,9 +573,8 @@ function logColor(level: string): string {
 }
 
 .log-message {
-  color: var(--color-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
+color: var(--color-text);
+overflow-wrap: anywhere; /* 长错误信息换行完整显示，不再依赖悬停 */
 }
 
 .log-entry.error .log-message {

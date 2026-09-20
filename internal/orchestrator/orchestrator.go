@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"dbbridge/internal/migrationlog"
 	"dbbridge/internal/typeconv"
 	types "dbbridge/pkg"
 )
@@ -40,6 +41,7 @@ type Orchestrator struct {
 	backups      []types.BackupInfo
 	tableReports map[int]types.TableReport // 按表序号保存，保证报告顺序稳定
 	pendingFKs   []pendingFK               // 延后添加的外键（数据迁完后统一补建）
+logFile      *migrationlog.Writer      // 本地日志文件（可能为 nil：创建失败时降级）
 }
 
 // pendingFK 待补建的外键
@@ -137,16 +139,18 @@ func (o *Orchestrator) workerCount() int {
 	return n
 }
 
-// log 记录日志
+// log 记录日志（同时写入回调与本地日志文件，两者内容完全一致）
 func (o *Orchestrator) log(level, table, message string) {
-	if o.onLog != nil {
-		o.onLog(types.LogEntry{
-			Time:    time.Now().Format("2006-01-02 15:04:05"),
-			Level:   level,
-			Table:   table,
-			Message: message,
-		})
+	entry := types.LogEntry{
+		Time:    time.Now().Format("2006-01-02 15:04:05"),
+		Level:   level,
+		Table:   table,
+		Message: message,
 	}
+	if o.onLog != nil {
+		o.onLog(entry)
+	}
+	o.logFile.Write(entry)
 }
 
 // reportProgress 上报进度
@@ -196,6 +200,17 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 	o.startTime = time.Now()
 	report := &types.MigrationReport{
 		StartTime: o.startTime.Format("2006-01-02 15:04:05"),
+	}
+
+	// 本地日志文件：完整记录本次迁移所有日志（含失败详情），便于事后查看与复制。
+	// 创建失败仅告警降级，不阻塞迁移。
+	logWriter, logErr := migrationlog.NewWriter()
+	if logErr == nil {
+		defer logWriter.Close()
+		o.logFile = logWriter
+		report.LogFile = logWriter.Path()
+	} else {
+		o.log("WARN", "", "本地日志文件创建失败（不影响迁移，仅保留界面日志）: "+logErr.Error())
 	}
 	// SQL 文件模式尚未实现（解析器未接入编排器）：在启动阶段快速失败，
 	// 避免先连接目标库、执行到取表结构阶段才中途报错。
@@ -443,8 +458,14 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName string) (int6
 
 	// 迁移结构
 	if !o.config.DataOnly {
-		// 处理目标库已存在的同名表
-		targetExists, _ := o.targetAdapter.TableExists(ctx, tableName)
+		// 处理目标库已存在的同名表。
+		// 防回归：TableExists 的错误禁止吞掉——一旦检查失败而按"不存在"处理，
+		// 备份/删除选项会静默失效，建表又被 CREATE TABLE 静默跳过（已禁用
+		// IF NOT EXISTS）或数据直接追加，造成数据重复且用户毫无感知。
+		targetExists, err := o.targetAdapter.TableExists(ctx, tableName)
+		if err != nil {
+			return 0, fmt.Errorf("检查目标表是否存在失败: %w", err)
+		}
 		if targetExists {
 			if o.config.BackupBefore {
 				// 备份模式：将目标表重命名为备份表名
