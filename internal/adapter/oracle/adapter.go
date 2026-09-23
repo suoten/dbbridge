@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"dbbridge/internal/typeconv"
@@ -24,7 +25,9 @@ type Adapter struct {
 	brand string
 
 	tablespace string // 目标表空间（可选，CREATE TABLE 时追加 TABLESPACE 子句）
-	identityOK bool   // 目标库支持 IDENTITY 列（Oracle 12c+）；否则自增回退 SEQUENCE+触发器
+
+	identityOnce sync.Once
+	identityOK   bool // 目标库支持 IDENTITY 列（Oracle 12c+）；否则自增回退 SEQUENCE+触发器
 }
 
 // SetTablespace 设置目标表空间（TablespaceAware 接口）
@@ -74,19 +77,40 @@ func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) er
 		return fmt.Errorf("Oracle: 连接失败: %w", err)
 	}
 	a.db = db
-	a.detectIdentitySupport(ctx)
 	return nil
 }
 
-// detectIdentitySupport 检测目标库是否支持 IDENTITY 列（12c 引入，列内自增）。
+// versionBannerRe 从 BANNER 提取主版本号（避免服务端 REGEXP_SUBSTR/TO_NUMBER
+// 在旧版本上的兼容问题）
+var versionBannerRe = regexp.MustCompile(`\d+`)
+
+// ensureIdentityDetected 惰性检测目标库是否支持 IDENTITY（12c 引入）。
+// 刻意不在 Connect 时做：连接路径保持与历史版本完全一致（连接失败时只
+// 报连接错误，不叠加任何额外查询）。检测推迟到首次建表前，自带短超时，
 // 失败时保守回退到 SEQUENCE+触发器方案（所有版本均可用）。
-func (a *Adapter) detectIdentitySupport(ctx context.Context) {
-	var major int
-	err := a.db.QueryRowContext(ctx,
-		`SELECT TO_NUMBER(REGEXP_SUBSTR(BANNER, '\d+')) FROM v$version WHERE ROWNUM = 1`).Scan(&major)
-	if err == nil {
+func (a *Adapter) ensureIdentityDetected() {
+	a.identityOnce.Do(func() {
+		if a.db == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		var banner string
+		err := a.db.QueryRowContext(ctx,
+			`SELECT BANNER FROM v$version WHERE ROWNUM = 1`).Scan(&banner)
+		if err != nil {
+			return // 检测失败 → 回退序列方案
+		}
+		m := versionBannerRe.FindString(banner)
+		if m == "" {
+			return
+		}
+		var major int
+		if _, err := fmt.Sscanf(m, "%d", &major); err != nil {
+			return
+		}
 		a.identityOK = major >= 12
-	}
+	})
 }
 
 // Close 关闭连接
@@ -307,6 +331,7 @@ func (a *Adapter) DropBackup(ctx context.Context, backupName string) error {
 
 // GenerateCreateTableDDL 生成建表 SQL
 func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
+	a.ensureIdentityDetected()
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`CREATE TABLE %s (
 `, qualifyTable(table.Name)))
