@@ -33,6 +33,10 @@ func FormatDefault(val string) string {
 		"now", "uuid", "gen_random_uuid", "sysdate", "curdate", "curtime", "rand", "random",
 		"null", "true", "false":
 		return v
+	// 将各方言特有的日期/时间函数统一转换为 SQL 标准的 CURRENT_TIMESTAMP，
+	// 确保目标数据库能正确解析 DEFAULT 子句
+	case "getdate", "getutcdate", "sysutcdatetime", "sysdatetime":
+		return "CURRENT_TIMESTAMP"
 	}
 	if strings.HasPrefix(v, "'") {
 		return v

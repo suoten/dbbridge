@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -40,10 +41,14 @@ func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) er
 	if port == 0 {
 		port = 27017
 	}
-	uri := fmt.Sprintf("mongodb://%s:%s@%s:%d/%s",
-		config.Username, config.Password, config.Host, port, config.Database)
-	if config.Username == "" {
-		uri = fmt.Sprintf("mongodb://%s:%d/%s", config.Host, port, config.Database)
+	// 构建连接 URI
+	// 当指定了用户名时，默认使用 admin 库做认证（MongoDB 的 root 用户在 admin 库创建），
+	// 除非连接串中已有 authSource 参数
+	uri := fmt.Sprintf("mongodb://%s:%d/%s", config.Host, port, config.Database)
+	if config.Username != "" {
+		uri = fmt.Sprintf("mongodb://%s:%s@%s:%d/%s?authSource=admin",
+			url.QueryEscape(config.Username), url.QueryEscape(config.Password),
+			config.Host, port, config.Database)
 	}
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
 	if err != nil {
@@ -198,7 +203,9 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 }
 
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
-	return fmt.Sprintf(`db.%s.drop()`, tableName), nil
+	// MongoDB 不是 SQL 数据库，返回 drop 命令的 JSON 表示
+	// ExecContext 会识别这个格式并执行 collection.Drop()
+	return fmt.Sprintf(`{"drop": "%s"}`, tableName), nil
 }
 
 func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit int) ([]types.Row, error) {
@@ -307,9 +314,18 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 
 func (a *Adapter) ExecContext(ctx context.Context, sqlText string) error {
 	// MongoDB 不执行 SQL，支持 db.runCommand() 风格的 JSON 命令
+	trimmed := strings.TrimSpace(sqlText)
+	// 跳过注释（如 "-- MongoDB: 集合 xxx 在首次写入时自动创建"）
+	if strings.HasPrefix(trimmed, "--") || trimmed == "" {
+		return nil
+	}
 	var cmd bson.M
-	if err := bson.UnmarshalExtJSON([]byte(sqlText), false, &cmd); err != nil {
+	if err := bson.UnmarshalExtJSON([]byte(trimmed), false, &cmd); err != nil {
 		return fmt.Errorf("MongoDB: 无法解析命令: %w", err)
+	}
+	// 处理 drop 命令：使用 Collection.Drop() 而不是 RunCommand
+	if dropName, ok := cmd["drop"].(string); ok {
+		return a.db.Collection(dropName).Drop(ctx)
 	}
 	if _, err := a.db.RunCommand(ctx, cmd).DecodeBytes(); err != nil {
 		return fmt.Errorf("MongoDB: 执行命令失败: %w", err)

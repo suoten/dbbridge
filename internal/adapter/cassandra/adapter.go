@@ -43,13 +43,35 @@ func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) er
 			Password: config.Password,
 		}
 	}
-	cluster.Keyspace = config.Database
+	// 先不指定 keyspace 连接，以便检查/创建目标 keyspace
 	cluster.Timeout = 30 * time.Second
 
 	session, err := cluster.CreateSession()
 	if err != nil {
 		return fmt.Errorf("Cassandra: 连接失败: %w", err)
 	}
+
+	// 如果指定了 keyspace 但不存在，自动创建
+	if config.Database != "" {
+		var ksCount int
+		if err := session.Query("SELECT COUNT(*) FROM system_schema.keyspaces WHERE keyspace_name = ?", config.Database).Consistency(gocql.One).Scan(&ksCount); err == nil && ksCount == 0 {
+			// 创建 keyspace（SimpleStrategy, replication_factor=1，适合开发/测试环境）
+			createKS := fmt.Sprintf("CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
+				config.Database)
+			if err := session.Query(createKS).Exec(); err != nil {
+				session.Close()
+				return fmt.Errorf("Cassandra: 创建 keyspace %s 失败: %w", config.Database, err)
+			}
+		}
+		// 切换到目标 keyspace
+		session.Close()
+		cluster.Keyspace = config.Database
+		session, err = cluster.CreateSession()
+		if err != nil {
+			return fmt.Errorf("Cassandra: 连接 keyspace %s 失败: %w", config.Database, err)
+		}
+	}
+
 	a.session = session
 	a.keyspace = config.Database
 	return nil

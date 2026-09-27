@@ -607,6 +607,32 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 				return
 			}
 		}
+		// SQLite 目标库：SQLite 无法 ALTER ADD CONSTRAINT，外键内联在 CREATE TABLE 中，
+		// 必须按依赖顺序建表（父表先于子表），否则会报 "no such table" 错误。
+		if !o.config.DataOnly && o.config.Target.Type == types.SQLite && len(tables) > 1 {
+			if layers := o.dependencyLayers(runCtx, tables); len(layers) > 0 {
+				if len(layers) > 1 {
+					o.log("INFO", "", fmt.Sprintf("SQLite 建表外键依赖分层: %d 层（父表先建，子表后建）", len(layers)))
+				}
+				for _, layer := range layers {
+					for _, t := range layer {
+						select {
+						case tableCh <- t:
+						case <-runCtx.Done():
+							return
+						}
+					}
+					for i := 0; i < len(layer); i++ {
+						select {
+						case <-layerDone:
+						case <-runCtx.Done():
+							return
+						}
+					}
+				}
+				return
+			}
+		}
 		for i, name := range tables {
 			select {
 			case tableCh <- indexedTable{index: i, name: name, target: o.resolveTargetName(name)}:

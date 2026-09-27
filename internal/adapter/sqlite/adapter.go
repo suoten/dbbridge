@@ -33,10 +33,11 @@ func init() {
 func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) error {
 	dsn := config.Database
 	if dsn == "" {
-		// 旧实现空路径静默落 :memory:，迁移“成功”但数据在进程退出后消失，
+		// 旧实现空路径静默落 :memory:，迁移"成功"但数据在进程退出后消失，
 		// 生产上等于静默丢失。这里显式报错让用户指定文件。
 		return fmt.Errorf("sqlite: 请指定 SQLite 数据库文件路径")
 	}
+
 	// 添加 pragma 优化；用户可能传入带参数的 DSN（如 file:x.db?mode=ro），此时用 & 追加
 	sep := "?"
 	if strings.Contains(dsn, "?") {
