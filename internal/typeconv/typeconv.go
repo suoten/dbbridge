@@ -32,7 +32,9 @@ func FormatDefault(val string) string {
 	case "current_timestamp", "current_date", "current_time", "localtime", "localtimestamp",
 		"now", "uuid", "gen_random_uuid", "sysdate", "curdate", "curtime", "rand", "random",
 		"null", "true", "false":
-		return v
+		// 返回 SQL 标准形式（不带括号），所有主流数据库均支持
+		// current_timestamp() → CURRENT_TIMESTAMP
+		return strings.ToUpper(key)
 	// 将各方言特有的日期/时间函数统一转换为 SQL 标准的 CURRENT_TIMESTAMP，
 	// 确保目标数据库能正确解析 DEFAULT 子句
 	case "getdate", "getutcdate", "sysutcdatetime", "sysdatetime":
@@ -85,6 +87,7 @@ var kindAliases = map[string]Kind{
 	"YEAR": KindYear,
 	// 小数
 	"DECIMAL": KindDecimal, "NUMERIC": KindDecimal,
+	"NUMBER": KindDecimal, // Oracle NUMBER → DECIMAL
 	"REAL": KindFloat, "FLOAT4": KindFloat, "FLOAT": KindFloat,
 	"DOUBLE": KindDouble, "DOUBLE PRECISION": KindDouble, "FLOAT8": KindDouble,
 	// 布尔/位
@@ -137,6 +140,14 @@ var kindAliases = map[string]Kind{
 // Normalize 将源方言的基础类型名归一化为中立类型。
 func Normalize(baseType string) Kind {
 	if k, ok := kindAliases[baseType]; ok {
+		return k
+	}
+	// 处理带精度的类型名，如 TIMESTAMP(6)、TIMESTAMP(3)、VARCHAR2(100)
+	stripped := baseType
+	if i := strings.IndexByte(stripped, '('); i > 0 {
+		stripped = strings.TrimSpace(stripped[:i])
+	}
+	if k, ok := kindAliases[stripped]; ok {
 		return k
 	}
 	return KindUnknown
@@ -595,10 +606,9 @@ func ToCassandra(k Kind, col types.ColumnMeta) string {
 	case KindBigInt:
 		return "BIGINT"
 	case KindDecimal:
-		if col.Precision != nil && col.Scale != nil {
-			return fmt.Sprintf("DECIMAL(%d, %d)", *col.Precision, *col.Scale)
-		}
-		return "DECIMAL"
+		// Cassandra 的 DECIMAL 需要 inf.Dec 类型，MySQL 驱动返回 string，
+		// 类型不匹配会 marshal 失败。用 DOUBLE 替代（gocql 可接受 float64/string）。
+		return "DOUBLE"
 	case KindFloat:
 		return "FLOAT"
 	case KindDouble:
@@ -606,9 +616,9 @@ func ToCassandra(k Kind, col types.ColumnMeta) string {
 	case KindBool, KindBit:
 		return "BOOLEAN"
 	case KindChar:
-		return toSize("TEXT", col.Length, 1)
+		return "TEXT"
 	case KindVarChar:
-		return toSize("TEXT", col.Length, 255)
+		return "TEXT"
 	case KindText:
 		return "TEXT"
 	case KindBlob, KindBinary:

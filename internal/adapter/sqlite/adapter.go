@@ -337,12 +337,12 @@ func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, err
 	return count, nil
 }
 
-// TableExists 检查表是否存在
+// TableExists 检查表是否存在（大小写不敏感，处理跨库表名大小写差异）
 func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
 	var count int
 	err := a.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM sqlite_master
-		WHERE type='table' AND name=?
+		WHERE type='table' AND lower(name)=lower(?)
 	`, tableName).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("sqlite: 检查表存在失败: %w", err)
@@ -475,12 +475,12 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			sb.WriteString(escapeIdent(c))
 		}
 		sb.WriteString(")")
-		if fk.OnDelete != "" && !strings.EqualFold(fk.OnDelete, "NO ACTION") {
-			sb.WriteString(" ON DELETE " + strings.ToUpper(fk.OnDelete))
-		}
-		if fk.OnUpdate != "" && !strings.EqualFold(fk.OnUpdate, "NO ACTION") {
-			sb.WriteString(" ON UPDATE " + strings.ToUpper(fk.OnUpdate))
-		}
+if fk.OnDelete != "" && !strings.EqualFold(strings.ReplaceAll(fk.OnDelete, "_", " "), "NO ACTION") {
+	sb.WriteString(" ON DELETE " + strings.ToUpper(strings.ReplaceAll(fk.OnDelete, "_", " ")))
+}
+if fk.OnUpdate != "" && !strings.EqualFold(strings.ReplaceAll(fk.OnUpdate, "_", " "), "NO ACTION") {
+	sb.WriteString(" ON UPDATE " + strings.ToUpper(strings.ReplaceAll(fk.OnUpdate, "_", " ")))
+}
 	}
 
 	sb.WriteString("\n)")
@@ -512,6 +512,21 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 // GenerateDropTableDDL 生成删表 SQL
 func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
 	return fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeIdent(tableName)), nil
+}
+
+// resolveActualTableName 查找目标库中实际存储的表名（大小写不敏感）
+// 跨库迁移时源库表名大小写可能与目标库不一致（如 PG 返回大写 USERS，SQLite 存储为 users）
+func (a *Adapter) resolveActualTableName(ctx context.Context, tableName string) string {
+	var actual string
+	err := a.db.QueryRowContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type='table' AND lower(name)=lower(?)
+		LIMIT 1
+	`, tableName).Scan(&actual)
+	if err == nil && actual != "" {
+		return actual
+	}
+	return tableName
 }
 
 // ReadData 按偏移量分页读取数据
@@ -633,7 +648,12 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 		}
 		row := make(types.Row)
 		for i, col := range cols {
-			row[col] = values[i]
+			// SQLite 驱动可能返回 []byte，统一转为 string
+			if b, ok := values[i].([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = values[i]
+			}
 		}
 		result = append(result, row)
 	}

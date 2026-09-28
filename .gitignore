@@ -67,3 +67,4 @@ design/
 # ---- 日志 ----
 *.log
 tmp/
+tmp_test/

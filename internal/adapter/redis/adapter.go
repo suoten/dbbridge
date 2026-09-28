@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,7 +115,13 @@ func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, err
 	var count int64
 	pattern := tableName + ":*"
 	iter := a.client.Scan(ctx, 0, pattern, 1000).Iterator()
+	seen := map[string]bool{}
 	for iter.Next(ctx) {
+		key := iter.Val()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		count++
 	}
 	return count, iter.Err()
@@ -197,19 +204,36 @@ func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
 }
 
 func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit int) ([]types.Row, error) {
+	// Redis SCAN 不保证顺序且可能返回重复 key，offset 分页会漏行/重复。
+	// 一次性读取全部 key（Redis 是内存库，性能可接受），由调用方按 limit 截取。
 	pattern := tableName + ":*"
 	iter := a.client.Scan(ctx, 0, pattern, 1000).Iterator()
-	var result []types.Row
-	skipped := 0
+	var allKeys []string
+	seen := map[string]bool{}
 	for iter.Next(ctx) {
-		if skipped < offset {
-			skipped++
+		key := iter.Val()
+		if seen[key] {
 			continue
 		}
-		if len(result) >= limit {
-			break
-		}
-		key := iter.Val()
+		seen[key] = true
+		allKeys = append(allKeys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("Redis: 扫描数据失败: %w", err)
+	}
+
+	// 按 offset/limit 截取
+	end := offset + limit
+	if end > len(allKeys) {
+		end = len(allKeys)
+	}
+	if offset >= len(allKeys) {
+		return nil, nil
+	}
+	keys := allKeys[offset:end]
+
+	var result []types.Row
+	for _, key := range keys {
 		keyType, _ := a.client.Type(ctx, key).Result()
 		var value string
 		switch keyType {
@@ -264,8 +288,91 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 }
 
 func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn string, lastKey any, limit int) ([]types.Row, error) {
-	// Redis 没有有序主键概念，退化为 offset 分页
-	return a.ReadData(ctx, tableName, 0, limit)
+	// Redis key 无确定性顺序，先排序再做 keyset 分页
+	pattern := tableName + ":*"
+	iter := a.client.Scan(ctx, 0, pattern, 1000).Iterator()
+	var allKeys []string
+	seen := map[string]bool{}
+	for iter.Next(ctx) {
+		key := iter.Val()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		allKeys = append(allKeys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("Redis: 扫描数据失败: %w", err)
+	}
+
+	// 按字典序排序，确保 keyset 分页的确定性
+	sort.Strings(allKeys)
+
+	// 游标分页：只返回 key > lastKey 的数据
+	var keys []string
+	for _, key := range allKeys {
+		if lastKey != nil {
+			if lk, ok := lastKey.(string); ok && key <= lk {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
+
+	// 按 limit 截取
+	if limit > 0 && len(keys) > limit {
+		keys = keys[:limit]
+	}
+
+	var result []types.Row
+	for _, key := range keys {
+		keyType, _ := a.client.Type(ctx, key).Result()
+		var value string
+		switch keyType {
+		case "string":
+			value, _ = a.client.Get(ctx, key).Result()
+		case "hash":
+			hashVal, _ := a.client.HGetAll(ctx, key).Result()
+			if b, err := json.Marshal(hashVal); err == nil {
+				value = string(b)
+			} else {
+				value = fmt.Sprintf("%v", hashVal)
+			}
+		case "list":
+			listVal, _ := a.client.LRange(ctx, key, 0, -1).Result()
+			if b, err := json.Marshal(listVal); err == nil {
+				value = string(b)
+			} else {
+				value = strings.Join(listVal, ",")
+			}
+		case "set":
+			setVal, _ := a.client.SMembers(ctx, key).Result()
+			if b, err := json.Marshal(setVal); err == nil {
+				value = string(b)
+			} else {
+				value = strings.Join(setVal, ",")
+			}
+		case "zset":
+			zsetVal, _ := a.client.ZRangeWithScores(ctx, key, 0, -1).Result()
+			if b, err := json.Marshal(zsetVal); err == nil {
+				value = string(b)
+			} else {
+				zsetStr := make([]string, len(zsetVal))
+				for i, z := range zsetVal {
+					zsetStr[i] = fmt.Sprintf("%v:%v", z.Member, z.Score)
+				}
+				value = strings.Join(zsetStr, ",")
+			}
+		default:
+			value = fmt.Sprintf("(type: %s)", keyType)
+		}
+		result = append(result, types.Row{
+			"key":   key,
+			"type":  string(keyType),
+			"value": value,
+		})
+	}
+	return result, nil
 }
 
 func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []string, rows []types.Row) error {

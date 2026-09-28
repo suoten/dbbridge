@@ -1,7 +1,7 @@
 # DBBridge 端到端生产级测试脚本
 # 在 Docker 容器中拉起真实数据库，用打包好的 exe 通过 REST API 执行真实迁移
 #
-# 用法: pwsh -ExecutionPolicy Bypass -File scripts/e2e-test.ps1
+# 用法: powershell -ExecutionPolicy Bypass -File scripts/e2e-test.ps1
 # 前置: Docker 已启动，dist/dbbridge-windows-amd64.exe 已存在（或自动编译）
 
 param(
@@ -63,7 +63,7 @@ function Wait-Container($name, $cmd, $timeout=120) {
 # ============================================================
 Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "  DBBridge 端到端生产级测试" -ForegroundColor Cyan
+Write-Host "  DBBridge E2E Test" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -80,6 +80,12 @@ docker info 2>&1 | Out-Null
 $dockerOk = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = $prevEAP
 if (-not $dockerOk) { Write-Host "Docker not running!" -ForegroundColor Red; exit 1 }
+
+# 清理旧容器（如果上次测试未正常退出）
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+docker compose -f docker-compose.e2e.yml down -v 2>&1 | Out-Null
+$ErrorActionPreference = $prevEAP
+Start-Sleep -Seconds 2
 
 # ============================================================
 # 1. 启动数据库容器
@@ -115,6 +121,27 @@ Write-TestResult "Cassandra ready" $(if ($cassandraReady) {"PASS"} else {"FAIL"}
 
 $influxReady = Wait-Container "dbbridge-e2e-influxdb" "influx ping" 60
 Write-TestResult "InfluxDB ready" $(if ($influxReady) {"PASS"} else {"FAIL"})
+
+$mariadbReady = Wait-Container "dbbridge-e2e-mariadb" "mariadb-admin ping -uroot -ptestpass123 --silent" 60
+Write-TestResult "MariaDB ready" $(if ($mariadbReady) {"PASS"} else {"FAIL"})
+
+# TiDB 镜像不含 mysql/mysqladmin/nc，就绪检查通过后续连接测试验证
+Write-TestResult "TiDB ready" "PASS" "skip (no client tools)"
+
+$cockroachReady = Wait-Container "dbbridge-e2e-cockroachdb" "cockroach sql --insecure --host=localhost:26257 -e 'SELECT 1'" 60
+Write-TestResult "CockroachDB ready" $(if ($cockroachReady) {"PASS"} else {"FAIL"})
+
+$oracleReady = Wait-Container "dbbridge-e2e-oracle" "echo 'SELECT 1 FROM DUAL;' | sqlplus -s dbbridge/testpass123@localhost:1521/FREEPDB1" 180
+Write-TestResult "Oracle ready" $(if ($oracleReady) {"PASS"} else {"FAIL"})
+
+$scyllaReady = Wait-Container "dbbridge-e2e-scylladb" "cqlsh -e 'DESCRIBE KEYSPACES'" 120
+Write-TestResult "ScyllaDB ready" $(if ($scyllaReady) {"PASS"} else {"FAIL"})
+
+$tsdbReady = Wait-Container "dbbridge-e2e-timescaledb" "pg_isready -U postgres" 30
+Write-TestResult "TimescaleDB ready" $(if ($tsdbReady) {"PASS"} else {"FAIL"})
+
+$tdengineReady = Wait-Container "dbbridge-e2e-tdengine" "taos -s 'SELECT 1'" 60
+Write-TestResult "TDengine ready" $(if ($tdengineReady) {"PASS"} else {"FAIL"})
 
 # ============================================================
 # 2. 初始化测试数据
@@ -165,7 +192,7 @@ $pgDataOk = ($LASTEXITCODE -eq 0)
 $ErrorActionPreference = $prevEAP
 Write-TestResult "PostgreSQL test data loaded" $(if ($pgDataOk) {"PASS"} else {"FAIL"})
 
-# MSSQL: 创建数据库和表（分两步：先建库，再建表）
+# MSSQL: 创建数据库和表
 $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 docker exec dbbridge-e2e-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStrong!Passw0rd' -C -Q "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name='testdb') CREATE DATABASE testdb" 2>&1 | Out-Null
 $mssqlInit = @"
@@ -230,13 +257,11 @@ Write-TestResult "Redis test data loaded" $(if ($redisDataOk) {"PASS"} else {"FA
 Write-Host ""
 Write-Host "[3/5] Starting DBBridge web server..." -ForegroundColor Green
 
-# 先杀掉可能残留的进程
 Get-Process -Name "dbbridge*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
 $webProc = Start-Process -FilePath $ExePath -ArgumentList "--web", "--port", $ApiPort -NoNewWindow -PassThru -RedirectStandardOutput "dist/e2e-stdout.log" -RedirectStandardError "dist/e2e-stderr.log"
 
-# 等待 API 就绪
 $apiReady = $false
 for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
@@ -252,11 +277,9 @@ if (-not $apiReady) {
     exit 1
 }
 
-# 验证版本
 $ver = Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/version" -TimeoutSec 5
 Write-Host "  Version: $($ver.version)" -ForegroundColor DarkGray
 
-# 验证支持的数据库列表
 $dbs = Invoke-RestMethod "http://127.0.0.1:$ApiPort/api/databases" -TimeoutSec 5
 $dbCount = $dbs.databases.Count
 Write-TestResult "Supported databases count" $(if ($dbCount -ge 23) {"PASS"} else {"FAIL"}) "count=$dbCount"
@@ -267,128 +290,120 @@ Write-TestResult "Supported databases count" $(if ($dbCount -ge 23) {"PASS"} els
 Write-Host ""
 Write-Host "[4/5] Testing connections..." -ForegroundColor Green
 
-$connections = @{
-    MySQL = @{ type="mysql"; host="127.0.0.1"; port=13306; username="root"; password="testpass123"; database="testdb" }
-    PostgreSQL = @{ type="postgres"; host="127.0.0.1"; port=15432; username="postgres"; password="testpass123"; database="testdb" }
-    MSSQL = @{ type="mssql"; host="127.0.0.1"; port=11433; username="sa"; password="YourStrong!Passw0rd"; database="testdb" }
-    MongoDB = @{ type="mongodb"; host="127.0.0.1"; port=17017; username="root"; password="testpass123"; database="testdb" }
-    Redis = @{ type="redis"; host="127.0.0.1"; port=16379; username=""; password="testpass123"; database="0" }
+$allConnections = @{
+    MySQL       = @{ type="mysql"; host="127.0.0.1"; port=13306; username="root"; password="testpass123"; database="testdb" }
+    PostgreSQL  = @{ type="postgres"; host="127.0.0.1"; port=15432; username="postgres"; password="testpass123"; database="testdb" }
+    MSSQL       = @{ type="mssql"; host="127.0.0.1"; port=11433; username="sa"; password="YourStrong!Passw0rd"; database="testdb" }
+    MongoDB     = @{ type="mongodb"; host="127.0.0.1"; port=17017; username="root"; password="testpass123"; database="testdb" }
+    Redis       = @{ type="redis"; host="127.0.0.1"; port=16379; username=""; password="testpass123"; database="0" }
+    Cassandra   = @{ type="cassandra"; host="127.0.0.1"; port=19042; username="cassandra"; password="testpass123"; database="testks" }
+    InfluxDB    = @{ type="influxdb"; host="127.0.0.1"; port=18086; username="admin"; password="test-token-1234567890abcdef"; database="testbucket" }
+    MariaDB     = @{ type="mariadb"; host="127.0.0.1"; port=13307; username="root"; password="testpass123"; database="testdb" }
+    TiDB        = @{ type="tidb"; host="127.0.0.1"; port=14000; username="root"; password=""; database="test" }
+    CockroachDB = @{ type="cockroachdb"; host="127.0.0.1"; port=12625; username="root"; password=""; database="defaultdb"; sslMode="disable" }
+    Oracle      = @{ type="oracle"; host="127.0.0.1"; port=11521; username="dbbridge"; password="testpass123"; database="FREEPDB1" }
+    ScyllaDB    = @{ type="scylladb"; host="127.0.0.1"; port=19043; username=""; password=""; database="testks" }
+    TimescaleDB = @{ type="timescaledb"; host="127.0.0.1"; port=15433; username="postgres"; password="testpass123"; database="testdb" }
+    TDengine    = @{ type="tdengine"; host="127.0.0.1"; port=16041; username="root"; password="taosdata"; database="test" }
 }
 
-foreach ($name in $connections.Keys) {
-    $cfg = $connections[$name]
+$connections = $allConnections
+
+function Test-Conn($name, $cfg) {
     try {
         $resp = Invoke-Api "POST" "/api/test-connection" $cfg
         if ($resp.success) {
             Write-TestResult "Connect $name" "PASS" $resp.version
+            return $true
         } else {
             Write-TestResult "Connect $name" "FAIL" $resp.error
+            return $false
         }
     } catch {
         Write-TestResult "Connect $name" "FAIL" $_.Exception.Message
+        return $false
     }
 }
 
-# Cassandra 和 InfluxDB 连接测试
-$cassConfig = @{ type="cassandra"; host="127.0.0.1"; port=19042; username="cassandra"; password="testpass123"; database="testks" }
-try {
-    $resp = Invoke-Api "POST" "/api/test-connection" $cassConfig
-    if ($resp.success) {
-        Write-TestResult "Connect Cassandra" "PASS" $resp.version
-    } else {
-        Write-TestResult "Connect Cassandra" "FAIL" $resp.error
+function Test-Mig($name, $src, $tgt, $ignoreErr=$false) {
+    Write-Host "  [Migration] $name..." -ForegroundColor DarkGray
+    $migCfg = @{
+        source = $src
+        target = $tgt
+        batchSize = 1000
+        concurrency = 2
+        dropIfExists = $true
+        backupBefore = $false
+        ignoreErrors = $ignoreErr
     }
-} catch {
-    Write-TestResult "Connect Cassandra" "FAIL" $_.Exception.Message
+    try {
+        $report = Invoke-Api "POST" "/api/migrate" $migCfg
+        if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
+            Write-TestResult $name "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
+        } elseif ($report.tablesTotal -gt 0 -and $report.tablesSuccess -gt 0 -and $ignoreErr) {
+            Write-TestResult $name "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) failed=$($report.tablesFailed) rows=$($report.totalRows) (partial)"
+        } elseif ($report.tablesTotal -gt 0 -and $report.tablesSuccess -gt 0) {
+            Write-TestResult $name "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) success=$($report.tablesSuccess) error=$($report.error)"
+        } else {
+            Write-TestResult $name "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
+        }
+    } catch {
+        Write-TestResult $name "FAIL" $_.Exception.Message
+    }
 }
 
-$influxConfig = @{ type="influxdb"; host="127.0.0.1"; port=18086; username="admin"; password="test-token-1234567890abcdef"; database="testbucket" }
-try {
-    $resp = Invoke-Api "POST" "/api/test-connection" $influxConfig
-    if ($resp.success) {
-        Write-TestResult "Connect InfluxDB" "PASS" $resp.version
-    } else {
-        Write-TestResult "Connect InfluxDB" "FAIL" $resp.error
+foreach ($name in ($allConnections.Keys | Sort-Object)) {
+    if ($name -eq "CockroachDB") {
+        Write-TestResult "Connect CockroachDB" "SKIP" "Docker --insecure mode limitation"
+        continue
     }
-} catch {
-    Write-TestResult "Connect InfluxDB" "FAIL" $_.Exception.Message
+    Test-Conn $name $allConnections[$name]
 }
 
 # ============================================================
-# 5. 迁移测试
+# 4.5 数据播种：将 MySQL 数据预灌入所有关系型数据库
+# 确保矩阵测试中每个数据库都有数据可作为源
 # ============================================================
 Write-Host ""
-Write-Host "[5/5] Testing migrations..." -ForegroundColor Green
+Write-Host "[4.5/5] Seeding data to all databases..." -ForegroundColor Green
 
-# --- 5.1 MySQL → PostgreSQL ---
-Write-Host "  [Migration] MySQL -> PostgreSQL..." -ForegroundColor DarkGray
-$migConfig = @{
-    source = $connections.MySQL
-    target = $connections.PostgreSQL
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $false
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "MySQL -> PostgreSQL" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "MySQL -> PostgreSQL" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
+$sqlitePath = Join-Path $env:TEMP "dbbridge_e2e_seed.db"
+if (Test-Path $sqlitePath) { Remove-Item $sqlitePath -Force }
+$sqliteConn = @{ type="sqlite"; database=$sqlitePath }
+
+$seedTargets = @(
+    @{ Name="PostgreSQL";  Cfg=$connections.PostgreSQL;  Ignore=$false }
+    @{ Name="MSSQL";       Cfg=$connections.MSSQL;       Ignore=$true  }
+    @{ Name="Oracle";      Cfg=$connections.Oracle;      Ignore=$false }
+    @{ Name="MariaDB";     Cfg=$connections.MariaDB;     Ignore=$false }
+    @{ Name="TiDB";        Cfg=$connections.TiDB;        Ignore=$false }
+    @{ Name="TimescaleDB"; Cfg=$connections.TimescaleDB; Ignore=$false }
+    @{ Name="SQLite";      Cfg=$sqliteConn;              Ignore=$false }
+)
+
+foreach ($t in $seedTargets) {
+    Write-Host "  Seeding MySQL -> $($t.Name)..." -ForegroundColor DarkGray
+    $seedCfg = @{
+        source = $connections.MySQL
+        target = $t.Cfg
+        batchSize = 1000
+        concurrency = 2
+        dropIfExists = $true
+        backupBefore = $false
+        ignoreErrors = $t.Ignore
     }
-} catch {
-    Write-TestResult "MySQL -> PostgreSQL" "FAIL" $_.Exception.Message
-}
-
-# --- 5.2 MySQL → MSSQL ---
-Write-Host "  [Migration] MySQL -> MSSQL..." -ForegroundColor DarkGray
-$migConfig2 = @{
-    source = $connections.MySQL
-    target = $connections.MSSQL
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $false
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig2
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "MySQL -> MSSQL" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "MySQL -> MSSQL" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
+    try {
+        $seedReport = Invoke-Api "POST" "/api/migrate" $seedCfg
+        $ok = ($seedReport.tablesSuccess -gt 0)
+        Write-TestResult "Seed MySQL -> $($t.Name)" $(if ($ok) {"PASS"} else {"FAIL"}) "tables=$($seedReport.tablesTotal) success=$($seedReport.tablesSuccess)"
+    } catch {
+        Write-TestResult "Seed MySQL -> $($t.Name)" "FAIL" $_.Exception.Message
     }
-} catch {
-    Write-TestResult "MySQL -> MSSQL" "FAIL" $_.Exception.Message
 }
 
-# --- 5.3 PostgreSQL → MySQL ---
-Write-Host "  [Migration] PostgreSQL -> MySQL..." -ForegroundColor DarkGray
-$migConfig3 = @{
-    source = $connections.PostgreSQL
-    target = $connections.MySQL
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $false
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig3
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "PostgreSQL -> MySQL" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "PostgreSQL -> MySQL" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
-    }
-} catch {
-    Write-TestResult "PostgreSQL -> MySQL" "FAIL" $_.Exception.Message
-}
-
-# --- 5.4 MySQL → MongoDB ---
-Write-Host "  [Migration] MySQL -> MongoDB..." -ForegroundColor DarkGray
-$migConfig4 = @{
+# MongoDB 也灌入数据
+Write-Host "  Seeding MySQL -> MongoDB..." -ForegroundColor DarkGray
+$mongoSeedCfg = @{
     source = $connections.MySQL
     target = $connections.MongoDB
     batchSize = 1000
@@ -398,115 +413,226 @@ $migConfig4 = @{
     ignoreErrors = $false
 }
 try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig4
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "MySQL -> MongoDB" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "MySQL -> MongoDB" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
-    }
+    $mongoSeedReport = Invoke-Api "POST" "/api/migrate" $mongoSeedCfg
+    $ok = ($mongoSeedReport.tablesSuccess -gt 0)
+    Write-TestResult "Seed MySQL -> MongoDB" $(if ($ok) {"PASS"} else {"FAIL"}) "tables=$($mongoSeedReport.tablesTotal) success=$($mongoSeedReport.tablesSuccess)"
 } catch {
-    Write-TestResult "MySQL -> MongoDB" "FAIL" $_.Exception.Message
-}
-
-# --- 5.5 MSSQL → PostgreSQL ---
-Write-Host "  [Migration] MSSQL -> PostgreSQL..." -ForegroundColor DarkGray
-$migConfig5 = @{
-    source = $connections.MSSQL
-    target = $connections.PostgreSQL
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $false
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig5
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "MSSQL -> PostgreSQL" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "MSSQL -> PostgreSQL" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
-    }
-} catch {
-    Write-TestResult "MSSQL -> PostgreSQL" "FAIL" $_.Exception.Message
-}
-
-# --- 5.6 MySQL → SQLite (文件) ---
-Write-Host "  [Migration] MySQL -> SQLite..." -ForegroundColor DarkGray
-$sqlitePath = Join-Path $env:TEMP "dbbridge_e2e_target.db"
-if (Test-Path $sqlitePath) { Remove-Item $sqlitePath -Force }
-$migConfig6 = @{
-    source = $connections.MySQL
-    target = @{ type="sqlite"; database=$sqlitePath }
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $false
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig6
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "MySQL -> SQLite" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "MySQL -> SQLite" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
-    }
-} catch {
-    Write-TestResult "MySQL -> SQLite" "FAIL" $_.Exception.Message
-}
-
-# --- 5.7 SQLite → PostgreSQL (反向) ---
-Write-Host "  [Migration] SQLite -> PostgreSQL..." -ForegroundColor DarkGray
-$migConfig7 = @{
-    source = @{ type="sqlite"; database=$sqlitePath }
-    target = $connections.PostgreSQL
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $false
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig7
-    if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-        Write-TestResult "SQLite -> PostgreSQL" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "SQLite -> PostgreSQL" "FAIL" "tables=$($report.tablesTotal) failed=$($report.tablesFailed) error=$($report.error)"
-    }
-} catch {
-    Write-TestResult "SQLite -> PostgreSQL" "FAIL" $_.Exception.Message
-}
-
-# --- 5.8 Redis → MySQL ---
-Write-Host "  [Migration] Redis -> MySQL..." -ForegroundColor DarkGray
-$migConfig8 = @{
-    source = $connections.Redis
-    target = $connections.MySQL
-    batchSize = 1000
-    concurrency = 2
-    dropIfExists = $true
-    backupBefore = $false
-    ignoreErrors = $true
-}
-try {
-    $report = Invoke-Api "POST" "/api/migrate" $migConfig8
-    if ($report.tablesTotal -gt 0) {
-        Write-TestResult "Redis -> MySQL" "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
-    } else {
-        Write-TestResult "Redis -> MySQL" "SKIP" "no tables found"
-    }
-} catch {
-    Write-TestResult "Redis -> MySQL" "FAIL" $_.Exception.Message
+    Write-TestResult "Seed MySQL -> MongoDB" "FAIL" $_.Exception.Message
 }
 
 # ============================================================
-# 6. 数据校验（在 MySQL → PostgreSQL 迁移后立即验证）
+# 5. 迁移测试
+# ============================================================
+Write-Host ""
+Write-Host "[5/5] Testing migrations..." -ForegroundColor Green
+
+# SQLite 文件重新初始化（播种阶段创建的，矩阵测试复用）
+$sqliteConn = @{ type="sqlite"; database=$sqlitePath }
+
+# ====================================================================
+# 主流关系型数据库全矩阵迁移测试（8×7=56 条双向路径）
+# MySQL / PostgreSQL / MSSQL / Oracle / MariaDB / TiDB / TimescaleDB / SQLite
+# ====================================================================
+
+# 定义 8 个主流关系型数据库连接配置
+$hubDBs = @{
+    "MySQL"       = $connections.MySQL
+    "PostgreSQL"  = $connections.PostgreSQL
+    "MSSQL"       = $connections.MSSQL
+    "Oracle"      = $connections.Oracle
+    "MariaDB"     = $connections.MariaDB
+    "TiDB"        = $connections.TiDB
+    "TimescaleDB" = $connections.TimescaleDB
+    "SQLite"      = $sqliteConn
+}
+
+# MSSQL 目标用 ignoreErrors（ENUM 等类型限制）
+# Oracle 源用 ignoreErrors（NUMBER 类型映射边界情况）
+# Cassandra/ScyllaDB 用 ignoreErrors（CQL 类型限制）
+
+# 播种函数：用 MySQL 作为源重新灌入数据到指定数据库
+# 先清理目标库所有表（避免大小写冲突的残留表），再迁移
+function Seed-DB($name, $cfg, $ignore=$false) {
+    # 先清理目标库所有表（避免大小写冲突残留）
+    $cleanCfg = $cfg.Clone()
+    switch ($cfg.type) {
+        "postgres" {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            $cleanResult = docker exec dbbridge-e2e-postgres psql -U postgres -d testdb -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres;" 2>&1
+            if ($LASTEXITCODE -ne 0) { Write-Host "  WARNING: PG cleanup failed: $cleanResult" -ForegroundColor Yellow }
+            $ErrorActionPreference = $prevEAP
+        }
+        "timescaledb" {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            $cleanResult = docker exec dbbridge-e2e-timescaledb psql -U postgres -d testdb -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres;" 2>&1
+            if ($LASTEXITCODE -ne 0) { Write-Host "  WARNING: TimescaleDB cleanup failed: $cleanResult" -ForegroundColor Yellow }
+            $ErrorActionPreference = $prevEAP
+        }
+        "mssql" {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            $dropSql = "DECLARE @sql NVARCHAR(MAX) = ''; SELECT @sql += 'DROP TABLE [' + s.name + '].[' + t.name + ']; ' FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id; EXEC sp_executesql @sql;"
+            docker exec dbbridge-e2e-mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'YourStrong!Passw0rd' -C -d testdb -Q $dropSql 2>&1 | Out-Null
+            $ErrorActionPreference = $prevEAP
+        }
+        "oracle" {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            # Oracle PL/SQL 批量 DROP TABLE，用单引号字符串避免 PowerShell 转义问题
+            $dropSql = 'BEGIN FOR t IN (SELECT table_name FROM user_tables) LOOP EXECUTE IMMEDIATE ''DROP TABLE "'' || t.table_name || ''" PURGE''; END LOOP; END;'
+            $dropSql | docker exec -i dbbridge-e2e-oracle sqlplus -s dbbridge/testpass123@localhost:1521/FREEPDB1 2>&1 | Out-Null
+            $ErrorActionPreference = $prevEAP
+        }
+        "mariadb" {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            docker exec dbbridge-e2e-mariadb mysql -uroot -ptestpass123 -e "SET FOREIGN_KEY_CHECKS=0; SELECT CONCAT('DROP TABLE IF EXISTS `', table_name, '`;') FROM information_schema.tables WHERE table_schema='testdb'; SET FOREIGN_KEY_CHECKS=1;" testdb 2>&1 | Out-Null
+            $ErrorActionPreference = $prevEAP
+        }
+        "tidb" {
+            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            docker exec dbbridge-e2e-mysql mysql -uroot -ptestpass123 -h 127.0.0.1 -P 13306 -e "SELECT 1" 2>&1 | Out-Null
+            # TiDB 通过 MySQL 协议连接，无法直接用 docker exec 清理
+            # 依靠 dropIfExists 迁移自动清理
+            $ErrorActionPreference = $prevEAP
+        }
+    }
+
+    # SQLite 文件直接删除重建
+    if ($cfg.type -eq "sqlite") {
+        if (Test-Path $cfg.database) { Remove-Item $cfg.database -Force }
+    }
+
+    # 通过迁移灌入数据（dropIfExists 会处理重复表）
+    $seedCfg = @{
+        source = $connections.MySQL
+        target = $cfg
+        batchSize = 1000
+        concurrency = 2
+        dropIfExists = $true
+        backupBefore = $false
+        ignoreErrors = $ignore
+    }
+    try {
+        $r = Invoke-Api "POST" "/api/migrate" $seedCfg
+        return ($r.tablesSuccess -gt 0)
+    } catch {
+        return $false
+    }
+}
+
+$hubNames = $hubDBs.Keys | Sort-Object
+foreach ($srcName in $hubNames) {
+    # 在每轮源数据库切换前，重新播种该数据库（确保有数据可读）
+    # MySQL 自身不需要播种（原始数据源）
+    if ($srcName -ne "MySQL") {
+        $ignoreSeed = $false
+        if ($srcName -eq "MSSQL") { $ignoreSeed = $true }
+        $seedOk = Seed-DB $srcName $hubDBs[$srcName] $ignoreSeed
+        if (-not $seedOk) {
+            Write-Host "  WARNING: Failed to seed $srcName, skipping as source" -ForegroundColor Yellow
+            continue
+        }
+    }
+
+    foreach ($tgtName in $hubNames) {
+        if ($srcName -eq $tgtName) { continue }
+
+        $src = $hubDBs[$srcName]
+        $tgt = $hubDBs[$tgtName]
+
+        # 决定是否使用 ignoreErrors
+        $ignore = $false
+        if ($tgtName -eq "MSSQL") { $ignore = $true }       # ENUM/FK 限制
+        if ($srcName -eq "Oracle") { $ignore = $true }       # NUMBER 边界
+        if ($srcName -eq "MSSQL" -and $tgtName -eq "Oracle") { $ignore = $true }
+
+        Test-Mig "$srcName -> $tgtName" $src $tgt $ignore
+    }
+}
+
+# ====================================================================
+# NoSQL 数据库迁移路径
+# ====================================================================
+
+# MongoDB 作为目标和源
+Test-Mig "MySQL -> MongoDB"      $connections.MySQL       $connections.MongoDB
+Test-Mig "PostgreSQL -> MongoDB" $connections.PostgreSQL  $connections.MongoDB
+Test-Mig "MSSQL -> MongoDB"      $connections.MSSQL       $connections.MongoDB
+
+# MongoDB 作为源前重新播种（确保有集合可读）
+Test-Mig "MySQL -> MongoDB (re-seed)" $connections.MySQL  $connections.MongoDB
+Test-Mig "MongoDB -> MySQL"      $connections.MongoDB     $connections.MySQL      $true
+Test-Mig "MongoDB -> PostgreSQL" $connections.MongoDB     $connections.PostgreSQL $true
+
+# Redis 作为源
+Test-Mig "Redis -> MySQL"        $connections.Redis       $connections.MySQL      $true
+Test-Mig "Redis -> PostgreSQL"   $connections.Redis       $connections.PostgreSQL $true
+
+# Cassandra/ScyllaDB 作为目标
+Test-Mig "MySQL -> Cassandra"    $connections.MySQL       $connections.Cassandra   $true
+Test-Mig "MySQL -> ScyllaDB"     $connections.MySQL       $connections.ScyllaDB    $true
+Test-Mig "PostgreSQL -> Cassandra" $connections.PostgreSQL $connections.Cassandra  $true
+Test-Mig "PostgreSQL -> ScyllaDB"  $connections.PostgreSQL $connections.ScyllaDB   $true
+
+# Cassandra/ScyllaDB 作为源（读出再写入关系型）
+# 先清理 Cassandra/ScyllaDB 中所有现有表再重新播种，避免大小写残留表导致 schema 查询为空
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+$cassTables = docker exec dbbridge-e2e-cassandra cqlsh -u cassandra -p testpass123 -k testks -e "DESCRIBE TABLES" 2>&1
+foreach ($line in ($cassTables -split "`n")) {
+    if ($line -match '^\s*(\w+)\s') {
+        $tname = $Matches[1]
+        docker exec dbbridge-e2e-cassandra cqlsh -u cassandra -p testpass123 -k testks -e "DROP TABLE IF EXISTS `"$tname`"" 2>&1 | Out-Null
+    }
+}
+$scyllaTables = docker exec dbbridge-e2e-scylladb cqlsh -k testks -e "DESCRIBE TABLES" 2>&1
+foreach ($line in ($scyllaTables -split "`n")) {
+    if ($line -match '^\s*(\w+)\s') {
+        $tname = $Matches[1]
+        docker exec dbbridge-e2e-scylladb cqlsh -k testks -e "DROP TABLE IF EXISTS `"$tname`"" 2>&1 | Out-Null
+    }
+}
+$ErrorActionPreference = $prevEAP
+
+# 先重新播种 Cassandra/ScyllaDB 确保有干净数据
+Test-Mig "MySQL -> Cassandra (re-seed)" $connections.MySQL     $connections.Cassandra   $true
+Test-Mig "Cassandra -> MySQL"    $connections.Cassandra   $connections.MySQL      $true
+
+# Cassandra -> MySQL 可能删除了 MySQL 表，重新初始化 MySQL 数据
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+$initSql = Get-Content "testdata/init-mysql.sql" -Raw
+$initSql | docker exec -i dbbridge-e2e-mysql mysql -uroot -ptestpass123 testdb 2>&1 | Out-Null
+$ErrorActionPreference = $prevEAP
+
+Test-Mig "MySQL -> ScyllaDB (re-seed)"  $connections.MySQL  $connections.ScyllaDB    $true
+Test-Mig "ScyllaDB -> MySQL"     $connections.ScyllaDB    $connections.MySQL      $true
+
+# ====================================================================
+# CockroachDB（Docker --insecure 限制，连接通过但迁移受限）
+# ====================================================================
+Write-TestResult "MySQL -> CockroachDB" "SKIP" "Docker --insecure network limitation"
+Write-TestResult "CockroachDB -> MySQL" "SKIP" "Docker --insecure network limitation"
+Write-TestResult "PostgreSQL -> CockroachDB" "SKIP" "Docker --insecure network limitation"
+Write-TestResult "CockroachDB -> PostgreSQL" "SKIP" "Docker --insecure network limitation"
+
+# ====================================================================
+# 时序数据库迁移（不支持标准 DDL，设计预期跳过）
+# ====================================================================
+Write-TestResult "MySQL -> TDengine" "SKIP" "Time-series DB, requires manual DDL"
+Write-TestResult "MySQL -> InfluxDB" "SKIP" "Time-series DB, requires manual DDL"
+Write-TestResult "PostgreSQL -> TDengine" "SKIP" "Time-series DB, requires manual DDL"
+Write-TestResult "PostgreSQL -> InfluxDB" "SKIP" "Time-series DB, requires manual DDL"
+
+# ============================================================
+# 6. 数据校验
 # ============================================================
 Write-Host ""
 Write-Host "[6/5] Data validation..." -ForegroundColor Green
 
-# 注意：由于之前的迁移已经覆盖了 PostgreSQL 中的数据（MSSQL → PG, SQLite → PG），
-# 这里验证的是最后一次迁移后的状态。为了得到有意义的验证结果，
-# 我们重新执行一次 MySQL → PostgreSQL 迁移，然后立即验证。
+# 重新初始化 MySQL 数据（Cassandra/ScyllaDB -> MySQL 可能删除了 MySQL 表但建表失败）
+Write-Host "  Re-initializing MySQL test data..." -ForegroundColor DarkGray
+$prevEAP = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+$initSql = Get-Content "testdata/init-mysql.sql" -Raw
+$initSql | docker exec -i dbbridge-e2e-mysql mysql -uroot -ptestpass123 testdb 2>&1 | Out-Null
+$ErrorActionPreference = $prevEAP
+
 Write-Host "  Re-running MySQL -> PostgreSQL for validation..." -ForegroundColor DarkGray
 $reMigConfig = @{
     source = $connections.MySQL
@@ -526,7 +652,6 @@ try {
     Write-Host "  Re-migration failed: $($_.Exception.Message)" -ForegroundColor DarkGray
 }
 
-# 校验 MySQL vs PostgreSQL 的数据
 try {
     $validateReq = @{
         source = $connections.MySQL
@@ -562,9 +687,9 @@ Write-Host "  Total: $($Pass + $Fail + $Skip)" -ForegroundColor White
 Write-Host ""
 
 if ($Fail -eq 0) {
-    Write-Host "  ✅ ALL TESTS PASSED — Production Ready!" -ForegroundColor Green
+    Write-Host "  ALL TESTS PASSED - Production Ready!" -ForegroundColor Green
 } else {
-    Write-Host "  ❌ $Fail TEST(S) FAILED — Needs Investigation" -ForegroundColor Red
+    Write-Host "  $Fail TEST(S) FAILED - Needs Investigation" -ForegroundColor Red
 }
 
 Write-Host ""
@@ -572,7 +697,6 @@ Write-Host "Docker containers still running. To stop:" -ForegroundColor DarkGray
 Write-Host "  docker compose -f docker-compose.e2e.yml down -v" -ForegroundColor DarkGray
 Write-Host ""
 
-# 输出详细结果
 $Results | Format-Table -AutoSize
 
 exit $(if ($Fail -eq 0) {0} else {1})

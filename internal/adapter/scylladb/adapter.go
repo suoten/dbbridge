@@ -6,6 +6,7 @@ package scylladb
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,13 +42,39 @@ func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) er
 			Password: config.Password,
 		}
 	}
-	cluster.Keyspace = config.Database
+	// 先不指定 keyspace 连接，以便检查/创建目标 keyspace
 	cluster.Timeout = 30 * time.Second
 
 	session, err := cluster.CreateSession()
 	if err != nil {
 		return fmt.Errorf("ScyllaDB: 连接失败: %w", err)
 	}
+
+	// 如果指定了 keyspace 但不存在，自动创建
+	if config.Database != "" {
+		var ksCount int
+		if err := session.Query("SELECT COUNT(*) FROM system_schema.keyspaces WHERE keyspace_name = ?", config.Database).Consistency(gocql.One).Scan(&ksCount); err == nil && ksCount == 0 {
+			// ScyllaDB 新版不支持 SimpleStrategy（tablet replication），用 NetworkTopologyStrategy
+			createKS := fmt.Sprintf("CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'NetworkTopologyStrategy', 'datacenter1': 1}",
+				config.Database)
+			if err := session.Query(createKS).Exec(); err != nil {
+				// 回退到 SimpleStrategy（Cassandra 兼容模式）
+				createKS = fmt.Sprintf("CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
+					config.Database)
+				if err := session.Query(createKS).Exec(); err != nil {
+					session.Close()
+					return fmt.Errorf("ScyllaDB: 创建 keyspace %s 失败: %w", config.Database, err)
+				}
+			}
+		}
+		session.Close()
+		cluster.Keyspace = config.Database
+		session, err = cluster.CreateSession()
+		if err != nil {
+			return fmt.Errorf("ScyllaDB: 连接 keyspace %s 失败: %w", config.Database, err)
+		}
+	}
+
 	a.session = session
 	a.keyspace = config.Database
 	return nil
@@ -85,34 +112,81 @@ func (a *Adapter) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{Name: tableName}
 
-	iter := a.session.Query(`
-		SELECT column_name, kind, type, position
-		FROM system_schema.columns
-		WHERE keyspace_name = ? AND table_name = ?
-		ORDER BY position
-	`, a.keyspace, tableName).Iter()
-	defer iter.Close()
-
+	// ScyllaDB schema 变更需要时间传播到系统表，重试 3 次
 	var columns []types.ColumnMeta
 	var pkCols []string
-	for {
-		var colName, kind, dataType string
-		var position int
-		if !iter.Scan(&colName, &kind, &dataType, &position) {
+	for attempt := 0; attempt < 3; attempt++ {
+		actualName := a.resolveTableName(ctx, tableName)
+		iter := a.session.Query(`
+			SELECT column_name, kind, type, position
+			FROM system_schema.columns
+			WHERE keyspace_name = ? AND table_name = ?
+			ORDER BY position
+		`, a.keyspace, actualName).Iter()
+
+		columns = nil
+		pkCols = nil
+		for {
+			var colName, kind, dataType string
+			var position int
+			if !iter.Scan(&colName, &kind, &dataType, &position) {
+				break
+			}
+			col := types.ColumnMeta{
+				Name:     colName,
+				DataType: dataType,
+				BaseType: strings.ToUpper(dataType),
+				Nullable: kind != "partition_key" && kind != "clustering",
+			}
+			if kind == "partition_key" || kind == "clustering" {
+				col.IsPrimaryKey = true
+				col.Nullable = false
+				pkCols = append(pkCols, colName)
+			}
+			columns = append(columns, col)
+		}
+		iter.Close()
+		if len(columns) > 0 {
 			break
 		}
-		col := types.ColumnMeta{
-			Name:     colName,
-			DataType: dataType,
-			BaseType: strings.ToUpper(dataType),
-			Nullable: kind != "partition_key" && kind != "clustering",
+		// 精确匹配失败，尝试大小写不敏感查询
+		if attempt == 0 {
+			lower := strings.ToLower(tableName)
+			iter2 := a.session.Query(`
+				SELECT table_name, column_name, kind, type, position
+				FROM system_schema.columns
+				WHERE keyspace_name = ?
+			`, a.keyspace).Iter()
+			for {
+				var tbl, colName, kind, dataType string
+				var position int
+				if !iter2.Scan(&tbl, &colName, &kind, &dataType, &position) {
+					break
+				}
+				if strings.ToLower(tbl) == lower {
+					col := types.ColumnMeta{
+						Name:     colName,
+						DataType: dataType,
+						BaseType: strings.ToUpper(dataType),
+						Nullable: kind != "partition_key" && kind != "clustering",
+					}
+					if kind == "partition_key" || kind == "clustering" {
+						col.IsPrimaryKey = true
+						col.Nullable = false
+						pkCols = append(pkCols, colName)
+					}
+					columns = append(columns, col)
+				}
+			}
+			iter2.Close()
+			if len(columns) > 0 {
+				break
+			}
 		}
-		if kind == "partition_key" || kind == "clustering" {
-			col.IsPrimaryKey = true
-			col.Nullable = false
-			pkCols = append(pkCols, colName)
+		if attempt < 2 {
+			a.session.AwaitSchemaAgreement(ctx)
+			time.Sleep(time.Second)
 		}
-		columns = append(columns, col)
 	}
 	schema.Columns = columns
 	if len(pkCols) > 0 {
@@ -120,22 +194,51 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 			Name: "PRIMARY", Columns: pkCols, IsUnique: true, IsPrimary: true,
 		})
 	}
+	if len(columns) == 0 {
+		return schema, fmt.Errorf("ScyllaDB: 表 %s 在 keyspace %s 中未找到列信息（可能表名大小写不匹配）", tableName, a.keyspace)
+	}
 	return schema, nil
 }
 
+// resolveTableName 大小写不敏感地解析 ScyllaDB 中的实际表名。
+func (a *Adapter) resolveTableName(ctx context.Context, tableName string) string {
+	var count int
+	if err := a.session.Query(`
+		SELECT COUNT(*) FROM system_schema.tables
+		WHERE keyspace_name = ? AND table_name = ?
+	`, a.keyspace, tableName).Scan(&count); err == nil && count > 0 {
+		return tableName
+	}
+	lower := strings.ToLower(tableName)
+	iter := a.session.Query(`
+		SELECT table_name FROM system_schema.tables
+		WHERE keyspace_name = ?
+	`, a.keyspace).Iter()
+	defer iter.Close()
+	var name string
+	for iter.Scan(&name) {
+		if strings.ToLower(name) == lower {
+			return name
+		}
+	}
+	return tableName
+}
+
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
+	actualName := a.resolveTableName(ctx, tableName)
 	var count int64
-	if err := a.session.Query(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(tableName))).Scan(&count); err != nil {
+	if err := a.session.Query(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(actualName))).Scan(&count); err != nil {
 		return 0, fmt.Errorf("ScyllaDB: 获取行数失败: %w", err)
 	}
 	return count, nil
 }
 
 func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
+	actual := a.resolveTableName(ctx, tableName)
 	var count int
 	if err := a.session.Query(`
 		SELECT COUNT(*) FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?
-	`, a.keyspace, tableName).Scan(&count); err != nil {
+	`, a.keyspace, actual).Scan(&count); err != nil {
 		return false, fmt.Errorf("ScyllaDB: 检查表存在失败: %w", err)
 	}
 	return count > 0, nil
@@ -302,11 +405,12 @@ func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
 
 // ReadData 读取数据（Cassandra/ScyllaDB 不支持 OFFSET，用 LIMIT + 内存跳过模拟）
 func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit int) ([]types.Row, error) {
+	actualName := a.resolveTableName(ctx, tableName)
 	totalFetch := offset + limit
 	if totalFetch <= 0 {
 		totalFetch = limit
 	}
-	query := fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(tableName), totalFetch)
+	query := fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(actualName), totalFetch)
 	iter := a.session.Query(query).Iter()
 	defer iter.Close()
 
@@ -333,9 +437,10 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 }
 
 func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn string, lastKey any, limit int) ([]types.Row, error) {
+	actualName := a.resolveTableName(ctx, tableName)
 	var query string
 	if lastKey != nil {
-		query = fmt.Sprintf(`SELECT * FROM "%s" WHERE "%s" > ? LIMIT %d`, escapeIdent(tableName), escapeIdent(keyColumn), limit)
+		query = fmt.Sprintf(`SELECT * FROM "%s" WHERE "%s" > ? LIMIT %d`, escapeIdent(actualName), escapeIdent(keyColumn), limit)
 		iter := a.session.Query(query, lastKey).Iter()
 		defer iter.Close()
 
@@ -351,7 +456,7 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 		}
 		return result, nil
 	}
-	query = fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(tableName), limit)
+	query = fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(actualName), limit)
 	iter := a.session.Query(query).Iter()
 	defer iter.Close()
 
@@ -379,12 +484,19 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	query := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s)`,
 		escapeIdent(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
 
+	// 获取目标表 schema，用于值类型转换（gocql 要求值类型与列类型严格匹配）
+	schema, _ := a.GetTableSchema(ctx, tableName)
+	colTypes := make(map[string]string, len(schema.Columns))
+	for _, c := range schema.Columns {
+		colTypes[strings.ToLower(c.Name)] = strings.ToLower(c.DataType)
+	}
+
 	batch := a.session.NewBatch(gocql.UnloggedBatch)
 	for _, row := range rows {
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
-				values[i] = val
+				values[i] = convertScyllaValue(val, colTypes[strings.ToLower(col)])
 			} else {
 				values[i] = nil
 			}
@@ -395,6 +507,40 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		return fmt.Errorf("ScyllaDB: 写入数据失败: %w", err)
 	}
 	return nil
+}
+
+// convertScyllaValue 将值转换为 ScyllaDB 列类型兼容的 Go 类型。
+// gocql 驱动要求值类型与列类型严格匹配，string 无法写入 double/float/int 列。
+func convertScyllaValue(val any, cassType string) any {
+	if val == nil {
+		return nil
+	}
+	var s string
+	switch v := val.(type) {
+	case string:
+		s = v
+	case []byte:
+		s = string(v)
+	default:
+		return val
+	}
+	switch {
+	case strings.Contains(cassType, "double") || strings.Contains(cassType, "float"):
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return f
+		}
+	case strings.Contains(cassType, "int") || strings.Contains(cassType, "bigint") || strings.Contains(cassType, "smallint") || strings.Contains(cassType, "tinyint"):
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+	case strings.Contains(cassType, "boolean"):
+		if s == "true" || s == "1" {
+			return true
+		} else if s == "false" || s == "0" {
+			return false
+		}
+	}
+	return val
 }
 
 func (a *Adapter) ExecContext(ctx context.Context, sqlText string) error {

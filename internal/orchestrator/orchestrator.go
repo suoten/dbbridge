@@ -494,11 +494,7 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 			if !exists {
 				continue
 			}
-			dropDDL, err := o.targetAdapter.GenerateDropTableDDL(target)
-			if err != nil {
-				return report, fmt.Errorf("生成删除 %s 的 DDL 失败: %w", target, err)
-			}
-			if err := o.targetAdapter.ExecContext(runCtx, dropDDL); err != nil {
+			if err := o.dropTargetTable(runCtx, target); err != nil {
 				return report, fmt.Errorf("预删除目标表 %s 失败: %w", target, err)
 			}
 			o.log("INFO", name, fmt.Sprintf("已预删除目标表: %s", target))
@@ -785,9 +781,8 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 				o.mu.Unlock()
 			} else if o.config.DropIfExists {
 				// 直接删除模式（错误显式传播）
-				dropDDL, _ := o.targetAdapter.GenerateDropTableDDL(targetName)
 				o.log("INFO", tableName, "目标库存在同名表，正在删除...")
-				if err := o.targetAdapter.ExecContext(ctx, dropDDL); err != nil {
+				if err := o.dropTargetTable(ctx, targetName); err != nil {
 					return 0, fmt.Errorf("删除目标同名表失败: %w", err)
 				}
 			}
@@ -1225,4 +1220,40 @@ func (o *Orchestrator) migrateRoutines(ctx context.Context, report *types.Migrat
 	}
 
 	o.log("INFO", "", fmt.Sprintf("存储过程迁移完成: 成功 %d, 失败 %d", report.RoutinesMigrated, len(report.RoutineErrors)))
+}
+
+// dropTargetTable 删除目标库中的表，处理跨库表名大小写不匹配问题。
+// 跨库迁移时源库表名大小写可能与目标库不一致（如 Oracle 返回大写 USERS，
+// 但目标 SQLite/MySQL 中存储为小写 users），直接 DROP TABLE IF EXISTS "USERS"
+// 不会删除 users 表。此方法先尝试用源表名删除，失败后通过 GetTables 查找
+// 目标库中大小写不敏感匹配的实际表名再删除。
+func (o *Orchestrator) dropTargetTable(ctx context.Context, tableName string) error {
+	dropDDL, _ := o.targetAdapter.GenerateDropTableDDL(tableName)
+	if err := o.targetAdapter.ExecContext(ctx, dropDDL); err == nil {
+		// 删除成功，检查表是否真的不存在了（DROP TABLE IF EXISTS 在某些库中
+		// 即使表不存在也不报错，但大小写不匹配时可能"成功"但未实际删除）
+		stillExists, _ := o.targetAdapter.TableExists(ctx, tableName)
+		if !stillExists {
+			return nil
+		}
+	}
+	// 第一次删除失败或表仍然存在，通过 GetTables 查找实际表名
+	targetTables, err := o.targetAdapter.GetTables(ctx)
+	if err != nil {
+		return fmt.Errorf("查找目标库表列表失败: %w", err)
+	}
+	lowerTarget := strings.ToLower(tableName)
+	for _, t := range targetTables {
+		if strings.ToLower(t.Name) == lowerTarget && t.Name != tableName {
+			// 找到大小写不同的实际表名，用实际名称重新删除
+			actualDropDDL, _ := o.targetAdapter.GenerateDropTableDDL(t.Name)
+			if err := o.targetAdapter.ExecContext(ctx, actualDropDDL); err != nil {
+				return fmt.Errorf("删除目标表 %s (实际名 %s) 失败: %w", tableName, t.Name, err)
+			}
+			o.log("INFO", tableName, fmt.Sprintf("目标表大小写不匹配，已用实际名 %s 删除", t.Name))
+			return nil
+		}
+	}
+	// 如果没找到匹配的表，说明表可能已被删除，忽略错误
+	return nil
 }

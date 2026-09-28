@@ -73,19 +73,18 @@ func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error
 	}
 	// 通过 URL 形式构造连接串，url.UserPassword 会自动编码密码中的特殊字符
 	dsn := &url.URL{
-		Scheme: "postgres",
-		User:   url.UserPassword(config.Username, config.Password),
-		Host:   fmt.Sprintf("%s:%d", config.Host, config.Port),
-		Path:   config.Database,
-		RawQuery: url.Values{
-			"sslmode": []string{sslmode},
-		}.Encode(),
+		Scheme:   "postgres",
+		User:     url.UserPassword(config.Username, config.Password),
+		Host:     fmt.Sprintf("%s:%d", config.Host, config.Port),
+		Path:     config.Database,
+		RawQuery: url.Values{"sslmode": []string{sslmode}}.Encode(),
 	}
-	connector, err := pq.NewConnector(dsn.String())
+	// 使用 sql.Open 而非 pq.NewConnector：sql.Open 内部走 pq.Driver.Open，
+	// 对 CockroachDB 等非标准 PG 后端的握手兼容性更好
+	db, err := sql.Open("postgres", dsn.String())
 	if err != nil {
 		return fmt.Errorf("%s: 构造连接串失败: %w", a.brand(), err)
 	}
-	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(10)
 	a.db = db
 	return nil
@@ -721,7 +720,13 @@ func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []st
 		}
 		row := make(types.Row)
 		for i, col := range cols {
-			row[col] = values[i]
+			// pq 驱动对 integer/numeric/text 等类型返回 []byte，
+			// 必须转为 string 或基础类型，否则写入目标库时会被当作 varbinary/BLOB
+			if b, ok := values[i].([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = values[i]
+			}
 		}
 		result = append(result, row)
 	}
@@ -882,11 +887,11 @@ func (a *Base) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKeyMet
 		sb.WriteString(fmt.Sprintf(`"%s"`, escapeIdent(c)))
 	}
 	sb.WriteString(")")
-	if fk.OnDelete != "" && !strings.EqualFold(fk.OnDelete, "NO ACTION") {
-		sb.WriteString(" ON DELETE " + strings.ToUpper(fk.OnDelete))
+	if fk.OnDelete != "" && !strings.EqualFold(strings.ReplaceAll(fk.OnDelete, "_", " "), "NO ACTION") {
+		sb.WriteString(" ON DELETE " + strings.ToUpper(strings.ReplaceAll(fk.OnDelete, "_", " ")))
 	}
-	if fk.OnUpdate != "" && !strings.EqualFold(fk.OnUpdate, "NO ACTION") {
-		sb.WriteString(" ON UPDATE " + strings.ToUpper(fk.OnUpdate))
+	if fk.OnUpdate != "" && !strings.EqualFold(strings.ReplaceAll(fk.OnUpdate, "_", " "), "NO ACTION") {
+		sb.WriteString(" ON UPDATE " + strings.ToUpper(strings.ReplaceAll(fk.OnUpdate, "_", " ")))
 	}
 	return sb.String(), nil
 }

@@ -14,6 +14,8 @@ import (
 
 	"dbbridge/internal/typeconv"
 	types "dbbridge/pkg"
+
+	_ "github.com/taosdata/driver-go/v3/taosRestful"
 )
 
 // Adapter TDengine 适配器
@@ -31,13 +33,13 @@ func init() {
 func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) error {
 	port := config.Port
 	if port == 0 {
-		port = 6030
+		port = 6041
 	}
 	// TDengine 使用 REST API 接口（不依赖 CGO）
-	// DSN 格式: taosJson://user:pass@host:port/db
-	dsn := fmt.Sprintf("taosJson://%s:%s@%s:%d/%s",
+	// DSN 格式: user:pass@http(host:port)/db
+	dsn := fmt.Sprintf("%s:%s@http(%s:%d)/%s",
 		config.Username, config.Password, config.Host, port, config.Database)
-	db, err := sql.Open("taosJson", dsn)
+	db, err := sql.Open("taosRestful", dsn)
 	if err != nil {
 		return fmt.Errorf("TDengine: open database failed: %w", err)
 	}
@@ -59,7 +61,7 @@ func (a *Adapter) Close() error {
 
 func (a *Adapter) GetVersion(ctx context.Context) (string, error) {
 	var version string
-	err := a.db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version)
+	err := a.db.QueryRowContext(ctx, "SELECT server_version()").Scan(&version)
 	if err != nil {
 		return "", fmt.Errorf("TDengine: get version failed: %w", err)
 	}

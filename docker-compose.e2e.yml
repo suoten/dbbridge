@@ -5,6 +5,9 @@
 # 所有数据库密码统一为 testpass123，端口映射到宿主机避免冲突。
 
 services:
+  # ============================================================
+  # 第一阶段：开源主流
+  # ============================================================
   mysql:
     image: mysql:8.0
     container_name: dbbridge-e2e-mysql
@@ -33,6 +36,61 @@ services:
       timeout: 5s
       retries: 20
 
+  sqlite:
+    # SQLite 是文件型数据库，不需要容器，这里用 busybox 占位说明
+    image: busybox
+    container_name: dbbridge-e2e-sqlite
+    command: sleep infinity
+
+  mariadb:
+    image: mariadb:11
+    container_name: dbbridge-e2e-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: testpass123
+      MARIADB_DATABASE: testdb
+    ports:
+      - "13307:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # OceanBase 太重（需要 4GB+ 内存），单独管理，此处不加入默认编排
+
+  # ============================================================
+  # 第二阶段：云原生与国产化
+  # ============================================================
+  tidb:
+    # TiDB 不需要单独的 TiKV，用 tidb:nightly 单机模式
+    image: pingcap/tidb:latest
+    container_name: dbbridge-e2e-tidb
+    ports:
+      - "14000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4000 2>/dev/null || (echo > /dev/tcp/127.0.0.1/4000) 2>/dev/null || true"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  cockroachdb:
+    image: cockroachdb/cockroach:latest-v24.1
+    container_name: dbbridge-e2e-cockroachdb
+    command: start-single-node --insecure --listen-addr=localhost:26257 --http-addr=localhost:8080 --advertise-addr=localhost
+    # 注意：CockroachDB --insecure 模式要求 listen-addr 为 localhost
+    # Docker 端口映射通过 host.docker.internal 或 network_mode: host 可绕过
+    # 这里用 network_mode: host 或端口映射均可，因为 Docker 做 NAT 转发
+    ports:
+      - "12625:26257"
+    healthcheck:
+      test: ["CMD-SHELL", "cockroach sql --insecure --host=localhost:26257 -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # ============================================================
+  # 第三阶段：主流商业与 NoSQL
+  # ============================================================
   mssql:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: dbbridge-e2e-mssql
@@ -47,6 +105,21 @@ services:
       interval: 10s
       timeout: 10s
       retries: 20
+
+  oracle:
+    image: gvenzl/oracle-free:23.9-slim-faststart
+    container_name: dbbridge-e2e-oracle
+    environment:
+      ORACLE_PASSWORD: testpass123
+      APP_USER: dbbridge
+      APP_USER_PASSWORD: testpass123
+    ports:
+      - "11521:1521"
+    healthcheck:
+      test: ["CMD-SHELL", "healthcheck.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
 
   mongodb:
     image: mongo:7
@@ -91,6 +164,20 @@ services:
       timeout: 10s
       retries: 30
 
+  scylladb:
+    # ScyllaDB 兼容 Cassandra CQL 协议
+    # 使用 AllowAllAuthenticator 避免默认密码问题
+    image: scylladb/scylla:latest
+    container_name: dbbridge-e2e-scylladb
+    command: --smp 1 --memory 512M --authenticator AllowAllAuthenticator --authorizer AllowAllAuthorizer
+    ports:
+      - "19043:9042"
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' 2>/dev/null || true"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
   influxdb:
     image: influxdb:2
     container_name: dbbridge-e2e-influxdb
@@ -108,3 +195,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 30
+
+  timescaledb:
+    # TimescaleDB 是 PostgreSQL 扩展
+    image: timescale/timescaledb:latest-pg16
+    container_name: dbbridge-e2e-timescaledb
+    environment:
+      POSTGRES_PASSWORD: testpass123
+      POSTGRES_DB: testdb
+    ports:
+      - "15433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  tdengine:
+    image: tdengine/tdengine:latest
+    container_name: dbbridge-e2e-tdengine
+    ports:
+      - "16041:6041"
+      - "16030:6030"
+    healthcheck:
+      test: ["CMD-SHELL", "taos -s 'SELECT 1' >/dev/null 2>&1 || true"]
+      interval: 10s
+      timeout: 5s
+      retries: 20

@@ -8,6 +8,7 @@ package cassandra
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,34 +110,86 @@ func (a *Adapter) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.TableSchema, error) {
 	schema := types.TableSchema{Name: tableName}
 
-	iter := a.session.Query(`
+	// Cassandra schema 变更（CREATE/DROP TABLE）需要时间传播到系统表，
+	// 立即查询 system_schema.columns 可能返回空结果。
+	// 重试 3 次，每次间隔 1 秒。
+	var columns []types.ColumnMeta
+	var pkCols []string
+	for attempt := 0; attempt < 3; attempt++ {
+		// 每次重试都重新解析表名（schema 传播可能影响结果）
+		actualName := a.resolveTableName(ctx, tableName)
+
+		iter := a.session.Query(`
 		SELECT column_name, kind, type, position
 		FROM system_schema.columns
 		WHERE keyspace_name = ? AND table_name = ?
 		ORDER BY position
-	`, a.keyspace, tableName).Iter()
-	defer iter.Close()
+		`, a.keyspace, actualName).Iter()
 
-	var columns []types.ColumnMeta
-	var pkCols []string
-	for {
-		var colName, kind, dataType string
-		var position int
-		if !iter.Scan(&colName, &kind, &dataType, &position) {
+		columns = nil
+		pkCols = nil
+		for {
+			var colName, kind, dataType string
+			var position int
+			if !iter.Scan(&colName, &kind, &dataType, &position) {
+				break
+			}
+			col := types.ColumnMeta{
+				Name:     colName,
+				DataType: dataType,
+				BaseType: strings.ToUpper(dataType),
+				Nullable: kind != "partition_key" && kind != "clustering",
+			}
+			if kind == "partition_key" || kind == "clustering" {
+				col.IsPrimaryKey = true
+				col.Nullable = false
+				pkCols = append(pkCols, colName)
+			}
+			columns = append(columns, col)
+		}
+		iter.Close()
+		if len(columns) > 0 {
 			break
 		}
-		col := types.ColumnMeta{
-			Name:     colName,
-			DataType: dataType,
-			BaseType: strings.ToUpper(dataType),
-			Nullable: kind != "partition_key" && kind != "clustering",
+		// 精确匹配失败，尝试大小写不敏感查询（Cassandra/ScyllaDB 表名大小写存储不一致）
+		if attempt == 0 {
+			lower := strings.ToLower(tableName)
+			iter2 := a.session.Query(`
+				SELECT table_name, column_name, kind, type, position
+				FROM system_schema.columns
+				WHERE keyspace_name = ?
+			`, a.keyspace).Iter()
+			for {
+				var tbl, colName, kind, dataType string
+				var position int
+				if !iter2.Scan(&tbl, &colName, &kind, &dataType, &position) {
+					break
+				}
+				if strings.ToLower(tbl) == lower {
+					col := types.ColumnMeta{
+						Name:     colName,
+						DataType: dataType,
+						BaseType: strings.ToUpper(dataType),
+						Nullable: kind != "partition_key" && kind != "clustering",
+					}
+					if kind == "partition_key" || kind == "clustering" {
+						col.IsPrimaryKey = true
+						col.Nullable = false
+						pkCols = append(pkCols, colName)
+					}
+					columns = append(columns, col)
+				}
+			}
+			iter2.Close()
+			if len(columns) > 0 {
+				break
+			}
 		}
-		if kind == "partition_key" || kind == "clustering" {
-			col.IsPrimaryKey = true
-			col.Nullable = false
-			pkCols = append(pkCols, colName)
+		// 等待 schema agreement
+		if attempt < 2 {
+			a.session.AwaitSchemaAgreement(ctx)
+			time.Sleep(time.Second)
 		}
-		columns = append(columns, col)
 	}
 	schema.Columns = columns
 	if len(pkCols) > 0 {
@@ -144,22 +197,56 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 			Name: "PRIMARY", Columns: pkCols, IsUnique: true, IsPrimary: true,
 		})
 	}
+	if len(columns) == 0 {
+		return schema, fmt.Errorf("Cassandra: 表 %s 在 keyspace %s 中未找到列信息（可能表名大小写不匹配）", tableName, a.keyspace)
+	}
 	return schema, nil
 }
 
+// resolveTableName 大小写不敏感地解析 Cassandra 中的实际表名。
+// Cassandra 系统表默认以小写存储表名，但迁移器可能传入大写表名。
+// 如果精确匹配失败，尝试大小写不敏感查找。
+func (a *Adapter) resolveTableName(ctx context.Context, tableName string) string {
+	// 先尝试精确匹配
+	var count int
+	if err := a.session.Query(`
+		SELECT COUNT(*) FROM system_schema.tables
+		WHERE keyspace_name = ? AND table_name = ?
+	`, a.keyspace, tableName).Scan(&count); err == nil && count > 0 {
+		return tableName
+	}
+	// 精确匹配失败，尝试大小写不敏感查找
+	lower := strings.ToLower(tableName)
+	iter := a.session.Query(`
+		SELECT table_name FROM system_schema.tables
+		WHERE keyspace_name = ?
+	`, a.keyspace).Iter()
+	defer iter.Close()
+	var name string
+	for iter.Scan(&name) {
+		if strings.ToLower(name) == lower {
+			return name
+		}
+	}
+	return tableName // 兜底返回原名
+}
+
 func (a *Adapter) GetRowCount(ctx context.Context, tableName string) (int64, error) {
+	actualName := a.resolveTableName(ctx, tableName)
 	var count int64
-	if err := a.session.Query(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(tableName))).Scan(&count); err != nil {
+	if err := a.session.Query(fmt.Sprintf(`SELECT COUNT(*) FROM "%s"`, escapeIdent(actualName))).Scan(&count); err != nil {
 		return 0, fmt.Errorf("Cassandra: 获取行数失败: %w", err)
 	}
 	return count, nil
 }
 
 func (a *Adapter) TableExists(ctx context.Context, tableName string) (bool, error) {
+	// 大小写不敏感检查（Cassandra 系统表以小写存储表名）
+	actual := a.resolveTableName(ctx, tableName)
 	var count int
 	if err := a.session.Query(`
 		SELECT COUNT(*) FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?
-	`, a.keyspace, tableName).Scan(&count); err != nil {
+	`, a.keyspace, actual).Scan(&count); err != nil {
 		return false, fmt.Errorf("Cassandra: 检查表存在失败: %w", err)
 	}
 	return count > 0, nil
@@ -338,12 +425,13 @@ func (a *Adapter) GenerateDropTableDDL(tableName string) (string, error) {
 // Cassandra 不支持 OFFSET，通过前 N+offset 行取后 limit 行的方式模拟分页。
 // 对于大表建议使用 ReadDataKeyset（基于分区键游标分页）。
 func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit int) ([]types.Row, error) {
+	actualName := a.resolveTableName(ctx, tableName)
 	// Cassandra 不支持 OFFSET，用 LIMIT offset+limit 然后跳过前 offset 行
 	totalFetch := offset + limit
 	if totalFetch <= 0 {
 		totalFetch = limit
 	}
-	query := fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(tableName), totalFetch)
+	query := fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(actualName), totalFetch)
 	iter := a.session.Query(query).Iter()
 	defer iter.Close()
 
@@ -358,7 +446,12 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 		}
 		row := make(types.Row)
 		for k, v := range rowData {
-			row[k] = v
+			// gocql 对 text/ascii/blob 等类型返回 []byte，转为 string
+			if b, ok := v.([]byte); ok {
+				row[k] = string(b)
+			} else {
+				row[k] = v
+			}
 		}
 		result = append(result, row)
 		if len(result) >= limit {
@@ -370,9 +463,10 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 }
 
 func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn string, lastKey any, limit int) ([]types.Row, error) {
+	actualName := a.resolveTableName(ctx, tableName)
 	var query string
 	if lastKey != nil {
-		query = fmt.Sprintf(`SELECT * FROM "%s" WHERE "%s" > ? LIMIT %d`, escapeIdent(tableName), escapeIdent(keyColumn), limit)
+		query = fmt.Sprintf(`SELECT * FROM "%s" WHERE "%s" > ? LIMIT %d`, escapeIdent(actualName), escapeIdent(keyColumn), limit)
 		iter := a.session.Query(query, lastKey).Iter()
 		defer iter.Close()
 
@@ -381,14 +475,18 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 		for iter.MapScan(rowData) {
 			row := make(types.Row)
 			for k, v := range rowData {
-				row[k] = v
+				if b, ok := v.([]byte); ok {
+					row[k] = string(b)
+				} else {
+					row[k] = v
+				}
 			}
 			result = append(result, row)
 			rowData = make(map[string]any)
 		}
 		return result, nil
 	}
-	query = fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(tableName), limit)
+	query = fmt.Sprintf(`SELECT * FROM "%s" LIMIT %d`, escapeIdent(actualName), limit)
 	iter := a.session.Query(query).Iter()
 	defer iter.Close()
 
@@ -416,12 +514,19 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 	query := fmt.Sprintf(`INSERT INTO "%s" (%s) VALUES (%s)`,
 		escapeIdent(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
 
-	batch := a.session.NewBatch(gocql.UnloggedBatch)
-	for _, row := range rows {
-		values := make([]any, len(columns))
-		for i, col := range columns {
-			if val, ok := row[col]; ok {
-				values[i] = val
+	// 获取目标表 schema，用于值类型转换（gocql 要求值类型与列类型严格匹配）
+	schema, _ := a.GetTableSchema(ctx, tableName)
+	colTypes := make(map[string]string, len(schema.Columns))
+for _, c := range schema.Columns {
+colTypes[strings.ToLower(c.Name)] = strings.ToLower(c.DataType)
+}
+
+batch := a.session.NewBatch(gocql.UnloggedBatch)
+for _, row := range rows {
+values := make([]any, len(columns))
+for i, col := range columns {
+if val, ok := row[col]; ok {
+values[i] = convertCassandraValue(val, colTypes[strings.ToLower(col)])
 			} else {
 				values[i] = nil
 			}
@@ -432,6 +537,42 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		return fmt.Errorf("Cassandra: 写入数据失败: %w", err)
 	}
 	return nil
+}
+
+// convertCassandraValue 将值转换为 Cassandra 列类型兼容的 Go 类型。
+// gocql 驱动要求值类型与列类型严格匹配，string 无法写入 double/float/int 列。
+func convertCassandraValue(val any, cassType string) any {
+	if val == nil {
+		return nil
+	}
+	// []byte 也转为 string 再做类型转换（跨库迁移时源库可能返回 []byte）
+	var s string
+	switch v := val.(type) {
+	case string:
+		s = v
+	case []byte:
+		s = string(v)
+	default:
+		// 非 string/[]byte 类型，如果已经是数值类型直接返回
+		return val
+	}
+	switch {
+	case strings.Contains(cassType, "double") || strings.Contains(cassType, "float"):
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return f
+		}
+	case strings.Contains(cassType, "int") || strings.Contains(cassType, "bigint") || strings.Contains(cassType, "smallint") || strings.Contains(cassType, "tinyint"):
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+	case strings.Contains(cassType, "boolean"):
+		if s == "true" || s == "1" {
+			return true
+		} else if s == "false" || s == "0" {
+			return false
+		}
+	}
+	return val
 }
 
 func (a *Adapter) ExecContext(ctx context.Context, sqlText string) error {

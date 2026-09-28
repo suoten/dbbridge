@@ -325,7 +325,7 @@ func (a *Base) GetRowCount(ctx context.Context, tableName string) (int64, error)
 	return count, nil
 }
 
-// TableExists 检查表是否存在（支持 "schema.table" 限定名）
+// TableExists 检查表是否存在（支持 "schema.table" 限定名，大小写不敏感）
 func (a *Base) TableExists(ctx context.Context, tableName string) (bool, error) {
 	var count int
 	schemaName, table := types.SplitQualified(tableName)
@@ -333,12 +333,12 @@ func (a *Base) TableExists(ctx context.Context, tableName string) (bool, error) 
 	if schemaName == "" {
 		err = a.db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.TABLES
-			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+			WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) = LOWER(?)
 		`, table).Scan(&count)
 	} else {
 		err = a.db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.TABLES
-			WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+			WHERE TABLE_SCHEMA = ? AND LOWER(TABLE_NAME) = LOWER(?)
 		`, schemaName, table).Scan(&count)
 	}
 	if err != nil {
@@ -432,11 +432,19 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		sb.WriteString("  ")
 		sb.WriteString(fmt.Sprintf("`%s` ", escapeIdent(col.Name)))
 		colType := a.MapType(col)
-		// 仅 JSON 列（无法加索引）降级为 VARCHAR(191)；TEXT/BLOB 用前缀索引解决
+		// JSON 列（无法加索引）降级为 VARCHAR(191)
 		if indexedCols[col.Name] && jsonCols[col.Name] {
 			switch colType {
 			case "JSON", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "TEXT", "BLOB":
 				colType = "VARCHAR(191)"
+			}
+		}
+		// 主键中的 TEXT/BLOB 列：MySQL 不允许 TEXT 做主键（Error 1170），
+		// 也不支持前缀索引做主键，必须降级为 VARCHAR(255)
+		if col.IsPrimaryKey && longTextCols[col.Name] {
+			switch colType {
+			case "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "TEXT", "BLOB", "LONGBLOB", "MEDIUMBLOB", "TINYBLOB":
+				colType = "VARCHAR(255)"
 			}
 		}
 		sb.WriteString(colType)

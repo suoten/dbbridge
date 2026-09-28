@@ -3,6 +3,7 @@ package oracle
 import (
 	"strings"
 	"testing"
+	"time"
 
 	types "dbbridge/pkg"
 )
@@ -130,5 +131,76 @@ func TestFormatOracleDefault(t *testing.T) {
 		if got != c.want {
 			t.Errorf("formatOracleDefault(%s, %q) = %q, 期望 %q", c.baseType, c.in, got, c.want)
 		}
+	}
+}
+
+// 防回归（ORA-01830）：源库日期时间字符串带微秒/时区/缺秒等变体时，
+// Oracle TO_TIMESTAMP('YYYY-MM-DD HH24:MI:SS.FF6') 格式严格匹配会报错。
+// normalizeTimestampString 必须将所有变体统一为标准格式。
+func TestNormalizeTimestampString(t *testing.T) {
+	cases := []struct {
+		in   string
+		isTS bool
+		want string
+	}{
+		// 纯日期 → 补全时间
+		{"2024-01-15", false, "2024-01-15 00:00:00"},
+		{"2024-01-15", true, "2024-01-15 00:00:00.000000"},
+		// 标准日期时间
+		{"2024-01-15 10:30:00", false, "2024-01-15 10:30:00"},
+		{"2024-01-15 10:30:00", true, "2024-01-15 10:30:00.000000"},
+		// 带微秒（不足6位补零）
+		{"2024-01-15 10:30:00.1", true, "2024-01-15 10:30:00.100000"},
+		{"2024-01-15 10:30:00.123", true, "2024-01-15 10:30:00.123000"},
+		{"2024-01-15 10:30:00.123456", true, "2024-01-15 10:30:00.123456"},
+		// 带微秒超过6位截断
+		{"2024-01-15 10:30:00.1234567", true, "2024-01-15 10:30:00.123456"},
+		// DATE 列忽略微秒
+		{"2024-01-15 10:30:00.123456", false, "2024-01-15 10:30:00"},
+		// T 分隔符
+		{"2024-01-15T10:30:00", true, "2024-01-15 10:30:00.000000"},
+		// 带时区（去除时区）
+		{"2024-01-15T10:30:00+08:00", false, "2024-01-15 10:30:00"},
+		{"2024-01-15T10:30:00.123Z", true, "2024-01-15 10:30:00.123000"},
+		// 不规则格式（原样返回）
+		{"15-JAN-24", false, "15-JAN-24"},
+	}
+	for _, c := range cases {
+		got := normalizeTimestampString(c.in, c.isTS)
+		if got != c.want {
+			t.Errorf("normalizeTimestampString(%q, isTS=%v) = %q, 期望 %q", c.in, c.isTS, got, c.want)
+		}
+	}
+}
+
+// 防回归：time.Time 值必须被正确格式化，否则 Oracle 驱动会用自己的
+// 格式（可能含时区）传给 TO_TIMESTAMP 导致 ORA-01830。
+func TestNormalizeTimestampValue(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	ts := time.Date(2024, 1, 15, 10, 30, 0, 123456000, loc)
+
+	// time.Time → TIMESTAMP 列
+	got := normalizeTimestampValue(ts, true)
+	if got != "2024-01-15 10:30:00.123456" {
+		t.Errorf("time.Time → TIMESTAMP = %v, 期望 2024-01-15 10:30:00.123456", got)
+	}
+
+	// time.Time → DATE 列
+	got = normalizeTimestampValue(ts, false)
+	if got != "2024-01-15 10:30:00" {
+		t.Errorf("time.Time → DATE = %v, 期望 2024-01-15 10:30:00", got)
+	}
+
+	// []byte → 字符串路径
+	got = normalizeTimestampValue([]byte("2024-01-15 10:30:00"), true)
+	if got != "2024-01-15 10:30:00.000000" {
+		t.Errorf("[]byte → TIMESTAMP = %v", got)
+	}
+
+	// 非日期类型原样返回
+	val := 42
+	got = normalizeTimestampValue(val, true)
+	if got != 42 {
+		t.Errorf("int 原样返回失败: %v", got)
 	}
 }
