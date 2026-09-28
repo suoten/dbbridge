@@ -76,14 +76,21 @@ services:
   cockroachdb:
     image: cockroachdb/cockroach:latest-v24.1
     container_name: dbbridge-e2e-cockroachdb
-    command: start-single-node --insecure --listen-addr=localhost:26257 --http-addr=localhost:8080 --advertise-addr=localhost
-    # 注意：CockroachDB --insecure 模式要求 listen-addr 为 localhost
-    # Docker 端口映射通过 host.docker.internal 或 network_mode: host 可绕过
-    # 这里用 network_mode: host 或端口映射均可，因为 Docker 做 NAT 转发
+    # CockroachDB --insecure 模式强制 listen-addr 为 localhost:26257，
+    # Docker NAT 无法转发到只监听 127.0.0.1 的服务。
+    # 解决方案：使用安全模式 + 自签证书，不受 localhost 限制。
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /certs
+        cockroach cert create-ca --certs-dir=/certs --ca-key=/certs/ca.key
+        cockroach cert create-node --certs-dir=/certs --ca-key=/certs/ca.key localhost 127.0.0.1 0.0.0.0 dbbridge-e2e-cockroachdb
+        cockroach cert create-client --certs-dir=/certs --ca-key=/certs/ca.key root
+        cockroach start-single-node --certs-dir=/certs --listen-addr=0.0.0.0:26257 --http-addr=0.0.0.0:8080 --advertise-addr=localhost
     ports:
       - "12625:26257"
     healthcheck:
-      test: ["CMD-SHELL", "cockroach sql --insecure --host=localhost:26257 -e 'SELECT 1' >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "cockroach sql --certs-dir=/certs --host=localhost:26257 -e 'SELECT 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 20

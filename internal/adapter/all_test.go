@@ -39,6 +39,8 @@ import (
 	_ "dbbridge/internal/adapter/scylladb"
 	_ "dbbridge/internal/adapter/tdengine"
 	_ "dbbridge/internal/adapter/timescaledb"
+	// 第四阶段
+	_ "dbbridge/internal/adapter/access"
 )
 
 // TestAllAdaptersRegistered 验证所有数据库类型都已注册。
@@ -70,6 +72,8 @@ func TestAllAdaptersRegistered(t *testing.T) {
 		types.InfluxDB,
 		types.TimescaleDB,
 		types.TDengine,
+		// 第四阶段
+		types.Access,
 	}
 
 	for _, dbType := range expected {
@@ -111,6 +115,8 @@ func TestAdapterGenerateDDL(t *testing.T) {
 		types.InfluxDB,
 		types.TimescaleDB,
 		types.TDengine,
+		// 第四阶段
+		types.Access,
 	}
 
 	// 统一的测试 schema（包含常见类型、主键、自增、默认值、索引、外键、CHECK 约束）
@@ -211,6 +217,8 @@ func TestAdapterGetTriggersAndRoutines(t *testing.T) {
 		types.InfluxDB,
 		types.TimescaleDB,
 		types.TDengine,
+		// 第四阶段
+		types.Access,
 	}
 
 	for _, dbType := range dbTypes {

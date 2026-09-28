@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -72,12 +73,25 @@ func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error
 		sslmode = "prefer"
 	}
 	// 通过 URL 形式构造连接串，url.UserPassword 会自动编码密码中的特殊字符
+	query := url.Values{"sslmode": []string{sslmode}}
+	// 支持通过环境变量传递 SSL 证书路径（CockroachDB 安全模式等场景）
+	// lib/pq 也支持 PGSSLROOTCERT/PGSSLCERT/PGSSLKEY 环境变量，
+	// 但通过 URL 参数更可靠（不依赖进程级环境变量）
+	if cert := os.Getenv("PGSSLROOTCERT"); cert != "" {
+		query.Set("sslrootcert", cert)
+	}
+	if cert := os.Getenv("PGSSLCERT"); cert != "" {
+		query.Set("sslcert", cert)
+	}
+	if key := os.Getenv("PGSSLKEY"); key != "" {
+		query.Set("sslkey", key)
+	}
 	dsn := &url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(config.Username, config.Password),
 		Host:     fmt.Sprintf("%s:%d", config.Host, config.Port),
 		Path:     config.Database,
-		RawQuery: url.Values{"sslmode": []string{sslmode}}.Encode(),
+		RawQuery: query.Encode(),
 	}
 	// 使用 sql.Open 而非 pq.NewConnector：sql.Open 内部走 pq.Driver.Open，
 	// 对 CockroachDB 等非标准 PG 后端的握手兼容性更好

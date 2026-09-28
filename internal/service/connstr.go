@@ -125,6 +125,100 @@ func (s *SQLService) GenerateConnStrings(cfg types.ConnectionConfig) *ConnStrRes
 		notes = append(notes, "达梦无官方 PHP PDO / Node.js 驱动，如需接入建议经 ODBC（Windows）或 unixODBC（Linux）桥接")
 		notes = append(notes, "达梦以\"模式（schema）\"组织对象，连接串中的库名按 schema 处理")
 
+	case types.Oracle:
+		p := defaultPort(port, 1521)
+		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:oracle:thin:@%s:%d/%s\nuser=%s\npassword=%s", host, p, db, user, pass)
+		tpl["Python (cx_Oracle)"] = fmt.Sprintf("oracle+cx_oracle://%s:%s@%s:%d/?service_name=%s", user, esc(pass), host, p, db)
+		tpl["Go (godror)"] = fmt.Sprintf(`user="%s" password="%s" connectString="%s:%d/%s"`, user, pass, host, p, db)
+		tpl["PHP (PDO)"] = fmt.Sprintf("new PDO('oci:dbname=%s:%d/%s', '%s', '%s');", host, p, db, user, pass)
+		tpl["Node.js (oracledb)"] = fmt.Sprintf("{ user: '%s', password: '%s', connectString: '%s:%d/%s' }", user, pass, host, p, db)
+
+	case types.Db2:
+		p := defaultPort(port, 50000)
+		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:db2://%s:%d/%s\nuser=%s\npassword=%s", host, p, db, user, pass)
+		tpl["Python (SQLAlchemy)"] = fmt.Sprintf("db2+ibm_db://%s:%s@%s:%d/%s", user, esc(pass), host, p, db)
+		tpl["Go (go_ibm_db)"] = fmt.Sprintf("DATABASE=%s;HOSTNAME=%s;PORT=%d;PROTOCOL=TCPIP;UID=%s;PWD=%s;", db, host, p, user, pass)
+		tpl["PHP (PDO)"] = fmt.Sprintf("new PDO('ibm:DRIVER={IBM DB2 ODBC DRIVER};DATABASE=%s;HOSTNAME=%s;PORT=%d;PROTOCOL=TCPIP;', '%s', '%s');", db, host, p, user, pass)
+		tpl["Node.js (ibm_db)"] = fmt.Sprintf(`{ database: '%s', hostname: '%s', port: %d, user: '%s', password: '%s', protocol: 'TCPIP' }`, db, host, p, user, pass)
+
+	case types.Cassandra, types.ScyllaDB:
+		p := defaultPort(port, 9042)
+		tpl["Java (DataStax)"] = fmt.Sprintf("Datastax Java Driver: contactPoints=%s:%d, keyspace=%s, username=%s, password=%s", host, p, db, user, pass)
+		tpl["Python (cassandra-driver)"] = fmt.Sprintf("Cluster(['%s'], port=%d, auth_provider=PlainTextAuthProvider(username='%s', password='%s')).connect('%s')", host, p, user, pass, db)
+		tpl["Go (gocql)"] = fmt.Sprintf("cluster := gocql.NewCluster(\"%s\"); cluster.Port = %d; cluster.Keyspace = \"%s\"; cluster.Authenticator = gocql.PasswordAuthenticator{Username: \"%s\", Password: \"%s\"}", host, p, db, user, pass)
+		tpl["Node.js (cassandra-driver)"] = fmt.Sprintf("{ contactPoints: ['%s:%d'], localDataCenter: 'datacenter1', keyspace: '%s', credentials: { username: '%s', password: '%s' } }", host, p, db, user, pass)
+		notes = append(notes, "Cassandra/ScyllaDB 使用 CQL 协议（端口 9042），非 SQL 驱动")
+
+	case types.MongoDB:
+		p := defaultPort(port, 27017)
+		authDb := "admin"
+		tpl["Java (JDBC)"] = fmt.Sprintf("mongodb://%s:%s@%s:%d/%s?authSource=%s", user, esc(pass), host, p, db, authDb)
+		tpl["Python (pymongo)"] = fmt.Sprintf("mongodb://%s:%s@%s:%d/?authSource=%s", user, esc(pass), host, p, authDb)
+		tpl["Go (mongo-driver)"] = fmt.Sprintf("mongodb://%s:%s@%s:%d/?authSource=%s", user, esc(pass), host, p, authDb)
+		tpl["Node.js (mongoose)"] = fmt.Sprintf("mongodb://%s:%s@%s:%d/%s?authSource=%s", user, esc(pass), host, p, db, authDb)
+		notes = append(notes, "MongoDB 使用自有协议（端口 27017），非 SQL 驱动")
+
+	case types.Redis:
+		p := defaultPort(port, 6379)
+		tpl["Java (Jedis)"] = fmt.Sprintf("redis://%s:%s@%s:%d/%d", user, esc(pass), host, p, 0)
+		tpl["Python (redis-py)"] = fmt.Sprintf("redis://%s:%s@%s:%d/0", user, esc(pass), host, p)
+		tpl["Go (go-redis)"] = fmt.Sprintf("redis://%s:%s@%s:%d/0", user, esc(pass), host, p)
+		tpl["Node.js (ioredis)"] = fmt.Sprintf("redis://:%s@%s:%d/0", esc(pass), host, p)
+		notes = append(notes, "Redis 使用 RESP 协议（端口 6379），非 SQL 驱动")
+
+	case types.InfluxDB:
+		p := defaultPort(port, 8086)
+		tpl["Java (influxdb-client)"] = fmt.Sprintf("http://%s:%d?token=%s&org=%s&bucket=%s", host, p, esc(pass), user, db)
+		tpl["Python (influxdb-client)"] = fmt.Sprintf("InfluxDBClient(url='http://%s:%d', token='%s', org='%s')", host, p, pass, user)
+		tpl["Go (influxdb-client-go)"] = fmt.Sprintf("http://%s:%d?token=%s&org=%s", host, p, esc(pass), user)
+		tpl["Node.js (@influxdata/influxdb-client)"] = fmt.Sprintf("new InfluxDB({ url: 'http://%s:%d', token: '%s' })", host, p, pass)
+		notes = append(notes, "InfluxDB 2.x 使用 HTTP API（端口 8086），非 SQL 驱动")
+
+	case types.TDengine:
+		p := defaultPort(port, 6041)
+		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:TAOS://%s:%d/%s?user=%s&password=%s", host, p, db, user, pass)
+		tpl["Python (taospy)"] = fmt.Sprintf("taos://%s:%s@%s:%d/%s", user, esc(pass), host, p, db)
+		tpl["Go (driver-go)"] = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", user, esc(pass), host, p, db)
+		tpl["Node.js (@tdengine/client)"] = fmt.Sprintf("{ host: '%s', port: %d, user: '%s', password: '%s', database: '%s' }", host, p, user, pass, db)
+		notes = append(notes, "TDengine 使用自有协议（端口 6041），支持 SQL 语法但非标准 SQL")
+
+	case types.TimescaleDB:
+		p := defaultPort(port, 5432)
+		ssl := cfg.SSLMode
+		if ssl == "" {
+			ssl = "disable"
+		}
+		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:postgresql://%s:%d/%s\nuser=%s\npassword=%s", host, p, db, user, pass)
+		tpl["Python (SQLAlchemy)"] = fmt.Sprintf("postgresql+psycopg2://%s:%s@%s:%d/%s", user, esc(pass), host, p, db)
+		tpl["Go (database/sql)"] = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, p, user, pass, db, ssl)
+		tpl["PHP (PDO)"] = fmt.Sprintf("new PDO('pgsql:host=%s;port=%d;dbname=%s', '%s', '%s');", host, p, db, user, pass)
+		tpl["Node.js (pg)"] = fmt.Sprintf("postgresql://%s:%s@%s:%d/%s", user, esc(pass), host, p, db)
+		notes = append(notes, "TimescaleDB 基于 PostgreSQL，可直接使用 PG 驱动连接")
+
+	case types.Aurora:
+		p := defaultPort(port, 3306)
+		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:mysql://%s:%d/%s?useSSL=true&requireSSL=true\nuser=%s\npassword=%s", host, p, db, user, pass)
+		tpl["Python (SQLAlchemy)"] = fmt.Sprintf("mysql+pymysql://%s:%s@%s:%d/%s?ssl_enabled=true", user, esc(pass), host, p, db)
+		tpl["Go (database/sql)"] = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?tls=true&parseTime=True&loc=Local", user, esc(pass), host, p, db)
+		tpl["Node.js (mysql2)"] = fmt.Sprintf("{ host: '%s', port: %d, user: '%s', password: '%s', database: '%s', ssl: {} }", host, p, user, pass, db)
+		notes = append(notes, "Aurora (MySQL 兼容版) 使用 MySQL 协议，建议启用 SSL/TLS")
+
+	case types.PolarDB:
+		p := defaultPort(port, 3306)
+		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:mysql://%s:%d/%s?useSSL=true\nuser=%s\npassword=%s", host, p, db, user, pass)
+		tpl["Python (SQLAlchemy)"] = fmt.Sprintf("mysql+pymysql://%s:%s@%s:%d/%s", user, esc(pass), host, p, db)
+		tpl["Go (database/sql)"] = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=True&loc=Local", user, esc(pass), host, p, db)
+		tpl["Node.js (mysql2)"] = fmt.Sprintf("{ host: '%s', port: %d, user: '%s', password: '%s', database: '%s' }", host, p, user, pass, db)
+		notes = append(notes, "PolarDB (MySQL 兼容版) 使用 MySQL 协议")
+
+	case types.Access:
+		tpl["Java (UCanAccess)"] = fmt.Sprintf("jdbc:ucanaccess://%s", db)
+		tpl["Python (pyodbc)"] = fmt.Sprintf("DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=%s;", db)
+		tpl["Go (adodb)"] = fmt.Sprintf(`Provider=Microsoft.Jet.OLEDB.4.0;Data Source=%s;`, db)
+		tpl["PHP (PDO)"] = fmt.Sprintf("new PDO('odbc:DRIVER={Microsoft Access Driver (*.mdb)};DBQ=%s');", db)
+		notes = append(notes, "Access 是桌面文件型数据库，\"数据库名\"即 .mdb/.accdb 文件路径")
+		notes = append(notes, "需安装 Microsoft Access Database Engine 或 ODBC 驱动")
+
 	default:
 		result.Error = fmt.Sprintf("不支持的数据库类型: %s", cfg.Type)
 		return result

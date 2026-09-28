@@ -129,6 +129,8 @@ var kindAliases = map[string]Kind{
 	"IDENTITY":      KindInt,     // Access 自增整型别名
 	"YESNO":         KindBool,    // Access 是/否类型
 	"BYTE":          KindTinyInt, // Access 字节类型
+	"SHORT":         KindSmallInt, // Access 短整型
+	"LONG":          KindInt,      // Access 长整型
 	"MEMO":          KindText,    // Access 备注字段
 	"LONGCHAR":      KindText,    // Access 备注字段别名
 	"SINGLE":        KindFloat,   // Access 单精度
@@ -139,16 +141,26 @@ var kindAliases = map[string]Kind{
 
 // Normalize 将源方言的基础类型名归一化为中立类型。
 func Normalize(baseType string) Kind {
-	if k, ok := kindAliases[baseType]; ok {
+	upper := strings.ToUpper(strings.TrimSpace(baseType))
+	if k, ok := kindAliases[upper]; ok {
 		return k
 	}
 	// 处理带精度的类型名，如 TIMESTAMP(6)、TIMESTAMP(3)、VARCHAR2(100)
-	stripped := baseType
+	stripped := upper
 	if i := strings.IndexByte(stripped, '('); i > 0 {
 		stripped = strings.TrimSpace(stripped[:i])
 	}
 	if k, ok := kindAliases[stripped]; ok {
 		return k
+	}
+	// 处理 MySQL UNSIGNED/ZEROFILL 后缀，如 "INT UNSIGNED"、"BIGINT ZEROFILL"
+	for _, suffix := range []string{" UNSIGNED", " ZEROFILL"} {
+		if strings.HasSuffix(stripped, suffix) {
+			base := strings.TrimSpace(stripped[:len(stripped)-len(suffix)])
+			if k, ok := kindAliases[base]; ok {
+				return k
+			}
+		}
 	}
 	return KindUnknown
 }
