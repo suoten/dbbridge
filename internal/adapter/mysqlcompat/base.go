@@ -499,11 +499,16 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		if idx.IsPrimary {
 			continue
 		}
+		// sqlite_autoindex_<table>_<n> 是 SQLite 源库内部索引名，目标库应使用语义化名称
+		idxName := idx.Name
+		if strings.HasPrefix(idxName, "sqlite_autoindex_") {
+			idxName = fmt.Sprintf("idx_%s_%s", table.Name, strings.Join(idx.Columns, "_"))
+		}
 		sb.WriteString(",\n")
 		if idx.IsUnique {
-			sb.WriteString(fmt.Sprintf("  UNIQUE INDEX `%s` (", escapeIdent(idx.Name)))
+			sb.WriteString(fmt.Sprintf("  UNIQUE INDEX `%s` (", escapeIdent(idxName)))
 		} else {
-			sb.WriteString(fmt.Sprintf("  INDEX `%s` (", escapeIdent(idx.Name)))
+			sb.WriteString(fmt.Sprintf("  INDEX `%s` (", escapeIdent(idxName)))
 		}
 		for i, c := range idx.Columns {
 			if i > 0 {

@@ -511,13 +511,19 @@ if fk.OnUpdate != "" && !strings.EqualFold(strings.ReplaceAll(fk.OnUpdate, "_", 
 		if idx.IsPrimary {
 			continue
 		}
+		// sqlite_autoindex_<table>_<n> 是 SQLite 内部保留名，目标库 CREATE INDEX 使用会报
+		// "object name reserved for internal use"，必须重命名为普通名称
+		idxName := idx.Name
+		if strings.HasPrefix(idxName, "sqlite_autoindex_") {
+			idxName = fmt.Sprintf("idx_%s_%s", table.Name, strings.Join(idx.Columns, "_"))
+		}
 		sb.WriteString(";\n")
 		if idx.IsUnique {
 			sb.WriteString("CREATE UNIQUE INDEX ")
 		} else {
 			sb.WriteString("CREATE INDEX ")
 		}
-		sb.WriteString(fmt.Sprintf("IF NOT EXISTS %s ON %s (", escapeIdent(idx.Name), escapeIdent(table.Name)))
+		sb.WriteString(fmt.Sprintf("IF NOT EXISTS %s ON %s (", escapeIdent(idxName), escapeIdent(table.Name)))
 		for i, c := range idx.Columns {
 			if i > 0 {
 				sb.WriteString(", ")
