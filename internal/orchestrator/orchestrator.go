@@ -222,6 +222,20 @@ type pendingFK struct {
 	fk    types.ForeignKeyMeta
 }
 
+// hasEmptyRefColumn 检查外键引用列中是否有空值
+// 源库（如 SQLite）可能未显式指定引用列，RefColumns 中放入空字符串
+func hasEmptyRefColumn(refCols []string) bool {
+	if len(refCols) == 0 {
+		return true
+	}
+	for _, c := range refCols {
+		if strings.TrimSpace(c) == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // isFKDDLGenerator 判断适配器是否支持延迟外键 DDL 生成
 func isFKDDLGenerator(a types.DatabaseAdapter) bool {
 	_, ok := a.(types.ForeignKeyDDLGenerator)
@@ -797,6 +811,12 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 		if deferFK {
 			o.mu.Lock()
 			for _, fk := range schema.ForeignKeys {
+				// 跳过引用列为空的外键：源库可能未显式指定引用列（SQLite 允许），
+				// 空引用列在目标库会生成语法错误 DDL（如 ``REFERENCES tab (``）
+				if hasEmptyRefColumn(fk.RefColumns) {
+					o.log("WARN", tableName, fmt.Sprintf("外键 %s 引用列信息缺失，跳过（源库未显式指定引用列）", fk.Name))
+					continue
+				}
 				// 引用表同样走映射（否则跨 schema 外键会指回源 schema）
 				fk.RefTable = o.resolveTargetName(fk.RefTable)
 				o.pendingFKs = append(o.pendingFKs, pendingFK{table: targetName, fk: fk})

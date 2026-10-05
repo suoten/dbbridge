@@ -239,7 +239,17 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 					continue
 				}
 			}
-			if name == "PRIMARY" || strings.HasPrefix(name, "sqlite_") {
+			// sqlite_autoindex_<table>_<n> 索引有两类来源：
+			//   origin=pk → PRIMARY KEY 自动索引（已在主键处理，跳过避免冗余）
+			//   origin=u  → 列级 UNIQUE 约束自动索引（必须保留，否则 UNIQUE 丢失）
+			// 老版本 SQLite 无 origin 列（3 列模式）：保留 sqlite_autoindex_ 以防丢失 UNIQUE
+			if name == "PRIMARY" {
+				continue
+			}
+			if origin == "pk" {
+				continue
+			}
+			if strings.HasPrefix(name, "sqlite_") && origin != "u" && origin != "" {
 				continue
 			}
 			idxList = append(idxList, idxInfo{name: name, unique: unique == 1})
@@ -453,7 +463,18 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	// 外键内联：SQLite 不支持 ALTER TABLE ADD CONSTRAINT，
 	// 外键必须在建表时定义，否则静默丢失（此前外键完全没被迁移）
 	for _, fk := range table.ForeignKeys {
+		// 跳过引用列为空的外键：源库可能未显式指定引用列（RefColumns 含空字符串）
 		if len(fk.Columns) == 0 || fk.RefTable == "" || len(fk.RefColumns) == 0 {
+			continue
+		}
+		hasEmpty := false
+		for _, c := range fk.RefColumns {
+			if strings.TrimSpace(c) == "" {
+				hasEmpty = true
+				break
+			}
+		}
+		if hasEmpty {
 			continue
 		}
 		fkName := fk.Name
