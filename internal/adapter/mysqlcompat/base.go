@@ -969,6 +969,19 @@ func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, la
 		return nil, fmt.Errorf("%s: 获取列名失败: %w", a.brand(), err)
 	}
 
+	// 二进制安全逻辑：区分 BLOB 和 TEXT 列
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("%s: 获取列类型失败: %w", a.brand(), err)
+	}
+	isBinary := make([]bool, len(colNames))
+	for i, ct := range colTypes {
+		typeStr := strings.ToUpper(ct.DatabaseTypeName())
+		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
+			strings.Contains(typeStr, "BINARY") ||
+			strings.Contains(typeStr, "VARBINARY")
+	}
+
 	var result []types.Row
 	for rows.Next() {
 		values := make([]any, len(colNames))
@@ -982,7 +995,11 @@ func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, la
 		row := make(types.Row)
 		for i, col := range colNames {
 			if b, ok := values[i].([]byte); ok {
-				row[col] = string(b)
+				if isBinary[i] {
+					row[col] = b
+				} else {
+					row[col] = string(b)
+				}
 			} else {
 				row[col] = values[i]
 			}

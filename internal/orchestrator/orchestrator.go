@@ -878,12 +878,24 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 
 		// 主键游标分页：单列主键时使用 keyset（深翻页 O(1)）；
 		// 无主键但有单列非空唯一索引时也用 keyset；都无则回退 OFFSET
+		// 复合主键不能只用第一列做 keyset（重复值会跳行），必须回退
 		var pkCol string
-		for _, c := range schema.Columns {
-			if c.IsPrimaryKey {
-				pkCol = c.Name
+		pkColCount := 0
+		for _, idx := range schema.Indexes {
+			if idx.IsPrimary {
+				pkColCount = len(idx.Columns)
 				break
 			}
+		}
+		if pkColCount <= 1 {
+			for _, c := range schema.Columns {
+				if c.IsPrimaryKey {
+					pkCol = c.Name
+					break
+				}
+			}
+		} else {
+			o.log("INFO", tableName, fmt.Sprintf("复合主键（%d列），回退非 keyset 分页", pkColCount))
 		}
 		if pkCol == "" {
 			for _, idx := range schema.Indexes {
