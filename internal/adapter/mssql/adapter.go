@@ -1032,13 +1032,16 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	if err != nil {
 		return nil, fmt.Errorf("MSSQL: 获取列类型失败: %w", err)
 	}
-	isBinary := make([]bool, len(cols))
-	for i, ct := range colTypes {
-		typeStr := strings.ToUpper(ct.DatabaseTypeName())
-		isBinary[i] = strings.Contains(typeStr, "BINARY") ||
-			strings.Contains(typeStr, "VARBINARY") ||
-			strings.Contains(typeStr, "IMAGE")
-	}
+isBinary := make([]bool, len(cols))
+for i, ct := range colTypes {
+if i >= len(cols) {
+break
+}
+typeStr := strings.ToUpper(ct.DatabaseTypeName())
+isBinary[i] = strings.Contains(typeStr, "BINARY") ||
+strings.Contains(typeStr, "VARBINARY") ||
+strings.Contains(typeStr, "IMAGE")
+}
 
 	var result []types.Row
 	for rows.Next() {

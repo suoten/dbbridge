@@ -793,12 +793,15 @@ func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []st
 	if err != nil {
 		return nil, fmt.Errorf("%s: 获取列类型失败: %w", a.brand(), err)
 	}
-	isBinary := make([]bool, len(cols))
-	for i, ct := range colTypes {
-		typeStr := strings.ToUpper(ct.DatabaseTypeName())
-		// BYTEA 是 PG 的二进制类型；CockroachDB 用 BYTES
-		isBinary[i] = typeStr == "BYTEA" || typeStr == "BYTES"
-	}
+isBinary := make([]bool, len(cols))
+for i, ct := range colTypes {
+if i >= len(cols) {
+break
+}
+typeStr := strings.ToUpper(ct.DatabaseTypeName())
+// BYTEA 是 PG 的二进制类型；CockroachDB 用 BYTES
+isBinary[i] = typeStr == "BYTEA" || typeStr == "BYTES"
+}
 
 	var result []types.Row
 	for rows.Next() {

@@ -535,13 +535,16 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	if err != nil {
 		return nil, fmt.Errorf("IBM Db2: get column types failed: %w", err)
 	}
-	isBinary := make([]bool, len(cols))
-	for i, ct := range colTypes {
-		typeStr := strings.ToUpper(ct.DatabaseTypeName())
-		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
-			strings.Contains(typeStr, "BINARY") ||
-			strings.Contains(typeStr, "VARBINARY")
-	}
+isBinary := make([]bool, len(cols))
+for i, ct := range colTypes {
+if i >= len(cols) {
+break
+}
+typeStr := strings.ToUpper(ct.DatabaseTypeName())
+isBinary[i] = strings.Contains(typeStr, "BLOB") ||
+strings.Contains(typeStr, "BINARY") ||
+strings.Contains(typeStr, "VARBINARY")
+}
 
 	var result []types.Row
 	for rows.Next() {
@@ -639,13 +642,16 @@ func (a *Adapter) ReadDataByPhysicalRowID(ctx context.Context, tableName string,
 	if err != nil {
 		return nil, fmt.Errorf("IBM Db2: get column types failed: %w", err)
 	}
-	isBinary := make([]bool, len(colNames))
-	for i, ct := range colTypes {
-		typeStr := strings.ToUpper(ct.DatabaseTypeName())
-		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
-			strings.Contains(typeStr, "BINARY") ||
-			strings.Contains(typeStr, "VARBINARY")
-	}
+isBinary := make([]bool, len(colNames))
+for i, ct := range colTypes {
+if i >= len(colNames) {
+break
+}
+typeStr := strings.ToUpper(ct.DatabaseTypeName())
+isBinary[i] = strings.Contains(typeStr, "BLOB") ||
+strings.Contains(typeStr, "BINARY") ||
+strings.Contains(typeStr, "VARBINARY")
+}
 
 	var result []types.Row
 	for rows.Next() {

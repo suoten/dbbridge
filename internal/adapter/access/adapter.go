@@ -369,51 +369,68 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 	return a.scanRows(ctx, query, args, cols)
 }
 
-// WriteData 批量写入数据
+// WriteData 批量写入数据（多值 INSERT + 事务保证批次原子性）
+// 使用 VALUES (?,?),(?,?),... 多值 INSERT 替代逐行 ExecContext，
+// 大幅减少 ODBC 调用次数。Access ODBC 参数上限较低，每批限制 250 行。
 func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []string, rows []types.Row) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	placeholders := make([]string, len(columns))
-	for i := range columns {
-		placeholders[i] = "?"
+	// 预处理 time.Time 值
+	processedRows := make([][]any, len(rows))
+	for i, row := range rows {
+		values := make([]any, len(columns))
+		for j, col := range columns {
+			if val, ok := row[col]; ok {
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05.999")
+				}
+				values[j] = val
+			} else {
+				values[j] = nil
+			}
+		}
+		processedRows[i] = values
 	}
 
-	query := fmt.Sprintf(
-		"INSERT INTO [%s] (%s) VALUES (%s)",
-		escapeIdent(tableName),
-		quoteIdentifiers(columns),
-		strings.Join(placeholders, ", "),
-	)
+	oneRowPlaceholders := "(" + strings.Repeat("?,", len(columns)-1) + "?)"
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("access: 开启事务失败: %w", err)
 	}
 
-	stmt, err := tx.PrepareContext(ctx, query)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("access: 预处理失败: %w", err)
-	}
-	defer stmt.Close()
+	// Access ODBC 参数上限较低，每批限制 250 行
+	const multiRowBatchSize = 250
 
-	for _, row := range rows {
-		values := make([]any, len(columns))
-		for i, col := range columns {
-			if val, ok := row[col]; ok {
-				if t, isTime := val.(time.Time); isTime {
-					val = t.Format("2006-01-02 15:04:05.999")
-				}
-				values[i] = val
-			} else {
-				values[i] = nil
-			}
+	for offset := 0; offset < len(processedRows); offset += multiRowBatchSize {
+		end := offset + multiRowBatchSize
+		if end > len(processedRows) {
+			end = len(processedRows)
 		}
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+		batch := processedRows[offset:end]
+
+		valueParts := make([]string, len(batch))
+		for i := range batch {
+			valueParts[i] = oneRowPlaceholders
+		}
+
+		query := fmt.Sprintf(
+			"INSERT INTO [%s] (%s) VALUES %s",
+			escapeIdent(tableName),
+			quoteIdentifiers(columns),
+			strings.Join(valueParts, ","),
+		)
+
+		args := make([]any, 0, len(batch)*len(columns))
+		for _, vals := range batch {
+			args = append(args, vals...)
+		}
+
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("access: 写入数据失败: %w", err)
+			return fmt.Errorf("access: 写入数据失败 (offset=%d, batch=%d): %w", offset, len(batch), err)
 		}
 	}
 

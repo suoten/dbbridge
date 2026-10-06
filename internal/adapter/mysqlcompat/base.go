@@ -709,6 +709,9 @@ func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []st
 	}
 	isBinary := make([]bool, len(cols))
 	for i, ct := range colTypes {
+		if i >= len(cols) {
+			break
+		}
 		typeStr := strings.ToUpper(ct.DatabaseTypeName())
 		// BLOB/BINARY/VARBINARY 等二进制类型保留 []byte
 		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
@@ -994,6 +997,9 @@ func (a *Base) ReadDataByPhysicalRowID(ctx context.Context, tableName string, la
 	}
 	isBinary := make([]bool, len(colNames))
 	for i, ct := range colTypes {
+		if i >= len(colNames) {
+			break
+		}
 		typeStr := strings.ToUpper(ct.DatabaseTypeName())
 		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
 			strings.Contains(typeStr, "BINARY") ||

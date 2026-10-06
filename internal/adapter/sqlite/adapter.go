@@ -714,6 +714,9 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	colTypes, _ := rows.ColumnTypes()
 	isBinary := make([]bool, len(cols))
 	for i, ct := range colTypes {
+		if i >= len(cols) {
+			break
+		}
 		// SQLite 驱动通过声明类型识别 BLOB 列
 		typeName := strings.ToUpper(ct.DatabaseTypeName())
 		if typeName == "BLOB" || strings.Contains(typeName, "BINARY") {

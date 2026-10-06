@@ -177,21 +177,21 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 	schema := types.TableSchema{Name: tableName}
 	schemaName, table := types.SplitQualified(tableName)
 
-	// 获取列信息（IDENTITY_COLUMN 为 12c+ 新增列，11g 上查询失败则回退不含该列的版本）
+	// 获取列信息（IDENTITY_COLUMN/VIRTUAL_COLUMN 为 12c+ 新增列，11g 上查询失败则回退）
 	rows, err := a.db.QueryContext(ctx, `
-	SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
-	       NULLABLE, DATA_DEFAULT, COLUMN_ID, IDENTITY_COLUMN
-	FROM ALL_TAB_COLUMNS
-	WHERE OWNER = NVL(:1, USER) AND TABLE_NAME = UPPER(:2)
-	ORDER BY COLUMN_ID
+SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
+       NULLABLE, DATA_DEFAULT, COLUMN_ID, IDENTITY_COLUMN, VIRTUAL_COLUMN
+FROM ALL_TAB_COLUMNS
+WHERE OWNER = NVL(:1, USER) AND TABLE_NAME = UPPER(:2)
+ORDER BY COLUMN_ID
 `, schemaName, table)
 	if err != nil {
 		rows, err = a.db.QueryContext(ctx, `
-	SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
-	       NULLABLE, DATA_DEFAULT, COLUMN_ID, 'NO'
-	FROM ALL_TAB_COLUMNS
-	WHERE OWNER = NVL(:1, USER) AND TABLE_NAME = UPPER(:2)
-	ORDER BY COLUMN_ID
+SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION, DATA_SCALE,
+       NULLABLE, DATA_DEFAULT, COLUMN_ID, 'NO', 'NO'
+FROM ALL_TAB_COLUMNS
+WHERE OWNER = NVL(:1, USER) AND TABLE_NAME = UPPER(:2)
+ORDER BY COLUMN_ID
 `, schemaName, table)
 	}
 	if err != nil {
@@ -201,10 +201,10 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 
 	var columns []types.ColumnMeta
 	for rows.Next() {
-		var name, dataType, nullable, identityCol string
+		var name, dataType, nullable, identityCol, virtualCol string
 		var dataLen, dataPrec, dataScale, colID sql.NullInt64
 		var defVal sql.NullString
-		if err := rows.Scan(&name, &dataType, &dataLen, &dataPrec, &dataScale, &nullable, &defVal, &colID, &identityCol); err != nil {
+		if err := rows.Scan(&name, &dataType, &dataLen, &dataPrec, &dataScale, &nullable, &defVal, &colID, &identityCol, &virtualCol); err != nil {
 			return schema, fmt.Errorf("Oracle: 读取列信息失败: %w", err)
 		}
 		col := types.ColumnMeta{
@@ -215,6 +215,8 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 			// IDENTITY 列映射为通用 AutoIncrement 语义（迁移到其他目标库时
 			// 由各自适配器生成对应自增 DDL）
 			AutoIncrement: strings.EqualFold(identityCol, "YES"),
+			// VIRTUAL_COLUMN=YES 表示生成列（Oracle 11g+ 的虚拟列）
+			Generated: strings.EqualFold(virtualCol, "YES"),
 		}
 		// Oracle NUMBER 类型根据精度/小数位细化基础类型：
 		// NUMBER(p, 0) → 整数类（INT/BIGINT），NUMBER(p, s) → DECIMAL
@@ -952,6 +954,9 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	}
 	isBinary := make([]bool, len(cols))
 	for i, ct := range colTypes {
+		if i >= len(cols) {
+			break
+		}
 		typeStr := strings.ToUpper(ct.DatabaseTypeName())
 		isBinary[i] = typeStr == "BLOB" || typeStr == "RAW" || typeStr == "LONG RAW"
 	}
