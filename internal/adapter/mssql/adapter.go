@@ -647,6 +647,20 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 
 	// 外键
 	for _, fk := range table.ForeignKeys {
+		// 跳过引用列为空的外键（源库如 SQLite 可能未显式指定引用列）
+		if len(fk.Columns) == 0 || fk.RefTable == "" || len(fk.RefColumns) == 0 {
+			continue
+		}
+		hasEmpty := false
+		for _, c := range fk.RefColumns {
+			if strings.TrimSpace(c) == "" {
+				hasEmpty = true
+				break
+			}
+		}
+		if hasEmpty {
+			continue
+		}
 		sb.WriteString(",\n")
 		// MSSQL 约束名 schema 级唯一：备份表会携带旧名存活，必须随机后缀去重
 		fkName := uniqueFKName(fk.Name, table.Name, fk.RefTable)
@@ -684,6 +698,32 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	// 目标文件组（可选；未配置时使用默认文件组）
 	if a.tablespace != "" {
 		sb.WriteString(fmt.Sprintf(" ON [%s]", escapeIdent(a.tablespace)))
+	}
+
+	// 二级索引（非主键索引）：MSSQL 需单独 CREATE INDEX 语句
+	for _, idx := range table.Indexes {
+		if idx.IsPrimary {
+			continue
+		}
+		// sqlite_autoindex_<table>_<n> 是 SQLite 源库内部索引名，目标库应使用语义化名称
+		idxName := idx.Name
+		if strings.HasPrefix(idxName, "sqlite_autoindex_") {
+			idxName = fmt.Sprintf("idx_%s_%s", table.Name, strings.Join(idx.Columns, "_"))
+		}
+		idxName = a.runName(idxName)
+		sb.WriteString(";\n")
+		if idx.IsUnique {
+			sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX [%s] ON %s (", escapeIdent(idxName), qualifyTable(table.Name)))
+		} else {
+			sb.WriteString(fmt.Sprintf("CREATE INDEX [%s] ON %s (", escapeIdent(idxName), qualifyTable(table.Name)))
+		}
+		for i, c := range idx.Columns {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf("[%s]", escapeIdent(c)))
+		}
+		sb.WriteString(")")
 	}
 
 	return sb.String(), nil

@@ -299,6 +299,36 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 	if a.tablespace != "" {
 		sb.WriteString(fmt.Sprintf(" IN \"%s\"", escapeIdent(a.tablespace)))
 	}
+
+	// 二级索引（非主键索引）：Db2 需单独 CREATE INDEX 语句
+	for _, idx := range table.Indexes {
+		if idx.IsPrimary {
+			continue
+		}
+		// sqlite_autoindex_<table>_<n> 是 SQLite 源库内部索引名，目标库应使用语义化名称
+		idxName := idx.Name
+		if strings.HasPrefix(idxName, "sqlite_autoindex_") {
+			idxName = fmt.Sprintf("idx_%s_%s", table.Name, strings.Join(idx.Columns, "_"))
+		}
+		// Db2 标识符最长 128 字节
+		if len(idxName) > 128 {
+			idxName = idxName[:128]
+		}
+		sb.WriteString(";\n")
+		if idx.IsUnique {
+			sb.WriteString(fmt.Sprintf(`CREATE UNIQUE INDEX "%s" ON %s (`, escapeIdent(idxName), qualifyTable(table.Name)))
+		} else {
+			sb.WriteString(fmt.Sprintf(`CREATE INDEX "%s" ON %s (`, escapeIdent(idxName), qualifyTable(table.Name)))
+		}
+		for i, c := range idx.Columns {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(fmt.Sprintf(`"%s"`, escapeIdent(c)))
+		}
+		sb.WriteString(")")
+	}
+
 	return sb.String(), nil
 }
 
