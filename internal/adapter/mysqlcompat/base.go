@@ -639,6 +639,10 @@ func (a *Base) WriteData(ctx context.Context, tableName string, columns []string
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
+				// time.Time 直写某些目标库会以 Go 字符串形式落库，统一格式化为标准 datetime
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05.999")
+				}
 				values[i] = val
 			} else {
 				values[i] = nil
@@ -668,13 +672,31 @@ func (a *Base) MapType(col types.ColumnMeta) string {
 	return typeconv.ToMySQL(typeconv.Normalize(col.BaseType), col)
 }
 
-// scanRows 执行查询并按列名映射为 Row（MySQL 驱动的 []byte 统一转为 string）
+// scanRows 执行查询并按列名映射为 Row。
+// MySQL 驱动对 TEXT/VARCHAR 返回 []byte，对 BLOB/BINARY 也返回 []byte。
+// 直接 string(b) 会破坏 BLOB 中的非 UTF-8 字节（NULL 字节、二进制数据）。
+// 安全方案：对 TEXT 类列转 string（便于 NormalizeTimeValue 等字符串处理），
+// 对 BLOB/BINARY 列保留 []byte 原样传递给目标库驱动。
 func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []string) ([]types.Row, error) {
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: 查询数据失败: %w", a.brand(), err)
 	}
 	defer rows.Close()
+
+	// 获取列类型信息，区分文本和二进制列
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("%s: 获取列类型失败: %w", a.brand(), err)
+	}
+	isBinary := make([]bool, len(cols))
+	for i, ct := range colTypes {
+		typeStr := strings.ToUpper(ct.DatabaseTypeName())
+		// BLOB/BINARY/VARBINARY 等二进制类型保留 []byte
+		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
+			strings.Contains(typeStr, "BINARY") ||
+			strings.Contains(typeStr, "VARBINARY")
+	}
 
 	var result []types.Row
 	for rows.Next() {
@@ -689,7 +711,12 @@ func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []st
 		row := make(types.Row)
 		for i, col := range cols {
 			if b, ok := values[i].([]byte); ok {
-				row[col] = string(b)
+				if isBinary[i] {
+					// 二进制列保留 []byte，避免 string() 转换破坏非 UTF-8 字节
+					row[col] = b
+				} else {
+					row[col] = string(b)
+				}
 			} else {
 				row[col] = values[i]
 			}

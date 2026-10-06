@@ -818,6 +818,9 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05.999")
+				}
 				values[i] = val
 			} else {
 				values[i] = nil
@@ -982,13 +985,28 @@ func (a *Adapter) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect ty
 	}
 }
 
-// scanRows 执行查询并按列名映射为 Row
+// scanRows 执行查询并按列名映射为 Row。
+// MSSQL 驱动对 VARBINARY/IMAGE 返回 []byte，对 VARCHAR/NVARCHAR 也返回 []byte。
+// 二进制列保留 []byte，文本列转 string。
 func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols []string) ([]types.Row, error) {
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("MSSQL: 查询数据失败: %w", err)
 	}
 	defer rows.Close()
+
+	// 获取列类型信息，区分文本和二进制列
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("MSSQL: 获取列类型失败: %w", err)
+	}
+	isBinary := make([]bool, len(cols))
+	for i, ct := range colTypes {
+		typeStr := strings.ToUpper(ct.DatabaseTypeName())
+		isBinary[i] = strings.Contains(typeStr, "BINARY") ||
+			strings.Contains(typeStr, "VARBINARY") ||
+			strings.Contains(typeStr, "IMAGE")
+	}
 
 	var result []types.Row
 	for rows.Next() {
@@ -1002,9 +1020,12 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 		}
 		row := make(types.Row)
 		for i, col := range cols {
-			// MSSQL 驱动返回 []byte 的场景统一转为 string
 			if b, ok := values[i].([]byte); ok {
-				row[col] = string(b)
+				if isBinary[i] {
+					row[col] = b
+				} else {
+					row[col] = string(b)
+				}
 			} else {
 				row[col] = values[i]
 			}

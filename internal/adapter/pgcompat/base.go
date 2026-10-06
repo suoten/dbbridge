@@ -716,6 +716,10 @@ func (a *Base) WriteData(ctx context.Context, tableName string, columns []string
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
+				// time.Time 直写某些目标库会以 Go 字符串形式落库，统一格式化为标准 datetime
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05.999")
+				}
 				values[i] = val
 			} else {
 				values[i] = nil
@@ -749,13 +753,28 @@ func (a *Base) MapType(col types.ColumnMeta) string {
 	return mapped
 }
 
-// scanRows 执行查询并按列名映射为 Row
+// scanRows 执行查询并按列名映射为 Row。
+// pq 驱动对 integer/numeric/text/bytea 等类型均返回 []byte。
+// 对 text/integer/numeric 转为 string 便于下游处理（NormalizeTimeValue 等），
+// 对 bytea（二进制）列保留 []byte 避免非 UTF-8 字节被破坏。
 func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []string) ([]types.Row, error) {
 	rows, err := a.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("%s: 查询数据失败: %w", a.brand(), err)
 	}
 	defer rows.Close()
+
+	// 获取列类型信息，区分文本和二进制列
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("%s: 获取列类型失败: %w", a.brand(), err)
+	}
+	isBinary := make([]bool, len(cols))
+	for i, ct := range colTypes {
+		typeStr := strings.ToUpper(ct.DatabaseTypeName())
+		// BYTEA 是 PG 的二进制类型；CockroachDB 用 BYTES
+		isBinary[i] = typeStr == "BYTEA" || typeStr == "BYTES"
+	}
 
 	var result []types.Row
 	for rows.Next() {
@@ -769,10 +788,13 @@ func (a *Base) scanRows(ctx context.Context, query string, args []any, cols []st
 		}
 		row := make(types.Row)
 		for i, col := range cols {
-			// pq 驱动对 integer/numeric/text 等类型返回 []byte，
-			// 必须转为 string 或基础类型，否则写入目标库时会被当作 varbinary/BLOB
 			if b, ok := values[i].([]byte); ok {
-				row[col] = string(b)
+				if isBinary[i] {
+					// 二进制列保留 []byte，避免 string() 转换破坏非 UTF-8 字节
+					row[col] = b
+				} else {
+					row[col] = string(b)
+				}
 			} else {
 				row[col] = values[i]
 			}

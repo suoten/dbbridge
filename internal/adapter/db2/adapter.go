@@ -398,6 +398,9 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		values := make([]any, len(columns))
 		for i, col := range columns {
 			if val, ok := row[col]; ok {
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05.999")
+				}
 				values[i] = val
 			} else {
 				values[i] = nil
@@ -505,6 +508,19 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	}
 	defer rows.Close()
 
+	// 获取列类型信息，区分文本和二进制列
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("IBM Db2: get column types failed: %w", err)
+	}
+	isBinary := make([]bool, len(cols))
+	for i, ct := range colTypes {
+		typeStr := strings.ToUpper(ct.DatabaseTypeName())
+		isBinary[i] = strings.Contains(typeStr, "BLOB") ||
+			strings.Contains(typeStr, "BINARY") ||
+			strings.Contains(typeStr, "VARBINARY")
+	}
+
 	var result []types.Row
 	for rows.Next() {
 		values := make([]any, len(cols))
@@ -517,7 +533,15 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 		}
 		row := make(types.Row)
 		for i, col := range cols {
-			row[col] = values[i]
+			if b, ok := values[i].([]byte); ok {
+				if isBinary[i] {
+					row[col] = b
+				} else {
+					row[col] = string(b)
+				}
+			} else {
+				row[col] = values[i]
+			}
 		}
 		result = append(result, row)
 	}

@@ -914,6 +914,17 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 	}
 	defer rows.Close()
 
+	// 获取列类型信息，区分文本和二进制列
+	colTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("Oracle: 获取列类型失败: %w", err)
+	}
+	isBinary := make([]bool, len(cols))
+	for i, ct := range colTypes {
+		typeStr := strings.ToUpper(ct.DatabaseTypeName())
+		isBinary[i] = typeStr == "BLOB" || typeStr == "RAW" || typeStr == "LONG RAW"
+	}
+
 	var result []types.Row
 	for rows.Next() {
 		values := make([]any, len(cols))
@@ -926,10 +937,13 @@ func (a *Adapter) scanRows(ctx context.Context, query string, args []any, cols [
 		}
 		row := make(types.Row)
 		for i, col := range cols {
-			// Oracle 驱动对 NUMBER/VARCHAR 等类型返回 []byte，
-			// 必须转为 string，否则写入目标库时会被当作 varbinary/BLOB
+			// Oracle 驱动对 NUMBER/VARCHAR/BLOB 等类型均返回 []byte
 			if b, ok := values[i].([]byte); ok {
-				row[col] = string(b)
+				if isBinary[i] {
+					row[col] = b
+				} else {
+					row[col] = string(b)
+				}
 			} else {
 				row[col] = values[i]
 			}
