@@ -767,24 +767,43 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 	return a.scanRows(ctx, query, args, cols)
 }
 
-// WriteData 批量写入数据
+// WriteData 批量写入数据（多值 INSERT + 事务保证批次原子性）
+// 使用 VALUES (@p1,@p2),(@p3,@p4),... 多值 INSERT 替代逐行 ExecContext，
+// 大幅减少网络往返。MSSQL 参数上限 2100，动态计算批次大小。
 func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []string, rows []types.Row) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// 构建参数化 INSERT
-	placeholders := make([]string, len(columns))
-	for i := range columns {
-		placeholders[i] = fmt.Sprintf("@p%d", i+1)
+	// 预处理 time.Time 值
+	processedRows := make([][]any, len(rows))
+	for i, row := range rows {
+		values := make([]any, len(columns))
+		for j, col := range columns {
+			if val, ok := row[col]; ok {
+				if t, isTime := val.(time.Time); isTime {
+					val = t.Format("2006-01-02 15:04:05.999")
+				}
+				values[j] = val
+			} else {
+				values[j] = nil
+			}
+		}
+		processedRows[i] = values
 	}
 
-	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
-		qualifyTable(tableName),
-		quoteIdentifiers(columns),
-		strings.Join(placeholders, ", "),
-	)
+	colCount := len(columns)
+
+	// MSSQL 参数上限 2100，每行 colCount 个参数，留 1 个裕量
+	// 同时限制不超过 500 行/批（避免 SQL 过长）
+	maxRowsByParams := (2099) / colCount
+	if maxRowsByParams < 1 {
+		maxRowsByParams = 1
+	}
+	multiRowBatchSize := 500
+	if maxRowsByParams < multiRowBatchSize {
+		multiRowBatchSize = maxRowsByParams
+	}
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -809,30 +828,40 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		}
 	}
 
-	stmt, err := tx.PrepareContext(ctx, query)
-	if err != nil {
-		turnOffIdentity()
-		tx.Rollback()
-		return fmt.Errorf("MSSQL: 预处理失败: %w", err)
-	}
-	defer stmt.Close()
-
-	for _, row := range rows {
-		values := make([]any, len(columns))
-		for i, col := range columns {
-			if val, ok := row[col]; ok {
-				if t, isTime := val.(time.Time); isTime {
-					val = t.Format("2006-01-02 15:04:05.999")
-				}
-				values[i] = val
-			} else {
-				values[i] = nil
-			}
+	for offset := 0; offset < len(processedRows); offset += multiRowBatchSize {
+		end := offset + multiRowBatchSize
+		if end > len(processedRows) {
+			end = len(processedRows)
 		}
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+		batch := processedRows[offset:end]
+
+		valueParts := make([]string, len(batch))
+		argIdx := 1
+		for i := range batch {
+			ph := make([]string, colCount)
+			for j := 0; j < colCount; j++ {
+				ph[j] = fmt.Sprintf("@p%d", argIdx)
+				argIdx++
+			}
+			valueParts[i] = "(" + strings.Join(ph, ",") + ")"
+		}
+
+		query := fmt.Sprintf(
+			"INSERT INTO %s (%s) VALUES %s",
+			qualifyTable(tableName),
+			quoteIdentifiers(columns),
+			strings.Join(valueParts, ","),
+		)
+
+		args := make([]any, 0, len(batch)*colCount)
+		for _, vals := range batch {
+			args = append(args, vals...)
+		}
+
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			turnOffIdentity()
 			tx.Rollback()
-			return fmt.Errorf("MSSQL: 写入数据失败: %w", err)
+			return fmt.Errorf("MSSQL: 写入数据失败 (offset=%d, batch=%d): %w", offset, len(batch), err)
 		}
 	}
 

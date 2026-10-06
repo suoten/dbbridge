@@ -584,7 +584,9 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 	return a.scanRows(ctx, query, args, cols)
 }
 
-// WriteData 批量写入数据
+// WriteData 批量写入数据（多值 INSERT + 事务保证批次原子性）
+// 使用 VALUES (:1,:2),(:3,:4),... 多值 INSERT 替代逐行 ExecContext，
+// 大幅减少网络往返。Oracle 绑定变量上限 1000，动态计算批次大小。
 func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []string, rows []types.Row) error {
 	if len(rows) == 0 {
 		return nil
@@ -603,51 +605,80 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 		}
 	}
 
-    placeholders := make([]string, len(columns))
-    for i, col := range columns {
-        switch {
-        case tsCols[col]:
-            // TIMESTAMP 列：用 TO_TIMESTAMP 显式转换，FF6 匹配 6 位微秒
-            placeholders[i] = fmt.Sprintf("TO_TIMESTAMP(:%d, 'YYYY-MM-DD HH24:MI:SS.FF6')", i+1)
-        case dateCols[col]:
-            // DATE 列：用 TO_DATE 转换（无微秒部分）
-            placeholders[i] = fmt.Sprintf("TO_DATE(:%d, 'YYYY-MM-DD HH24:MI:SS')", i+1)
-        default:
-            placeholders[i] = fmt.Sprintf(":%d", i+1)
-        }
-    }
-	query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES (%s)`,
-		qualifyTable(tableName), quoteIdentifiers(columns), strings.Join(placeholders, ", "))
+	colCount := len(columns)
+
+	// 预处理行数据（时间值规范化）
+	processedRows := make([][]any, len(rows))
+	for i, row := range rows {
+		values := make([]any, colCount)
+		for j, col := range columns {
+			if val, ok := row[col]; ok {
+				if dateCols[col] || tsCols[col] {
+					val = normalizeTimestampValue(val, tsCols[col])
+				}
+				values[j] = val
+			} else {
+				values[j] = nil
+			}
+		}
+		processedRows[i] = values
+	}
+
+	// Oracle 绑定变量上限 1000，每行 colCount 个参数
+	// 同时限制不超过 500 行/批
+	maxRowsByParams := 999 / colCount
+	if maxRowsByParams < 1 {
+		maxRowsByParams = 1
+	}
+	multiRowBatchSize := 500
+	if maxRowsByParams < multiRowBatchSize {
+		multiRowBatchSize = maxRowsByParams
+	}
 
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("Oracle: 开启事务失败: %w", err)
 	}
-	stmt, err := tx.PrepareContext(ctx, query)
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("Oracle: 预处理失败: %w", err)
-	}
-	defer stmt.Close()
-    for _, row := range rows {
-        values := make([]any, len(columns))
-        for i, col := range columns {
-            if val, ok := row[col]; ok {
-                // 日期/时间戳列：统一转为规范化的字符串字面量，
-                // 配合 TO_DATE / TO_TIMESTAMP 占位符使用
-                if dateCols[col] || tsCols[col] {
-                    val = normalizeTimestampValue(val, tsCols[col])
-                }
-                values[i] = val
-            } else {
-                values[i] = nil
-            }
-        }
-		if _, err := stmt.ExecContext(ctx, values...); err != nil {
+
+	for offset := 0; offset < len(processedRows); offset += multiRowBatchSize {
+		end := offset + multiRowBatchSize
+		if end > len(processedRows) {
+			end = len(processedRows)
+		}
+		batch := processedRows[offset:end]
+
+		valueParts := make([]string, len(batch))
+		argIdx := 1
+		for i := range batch {
+			ph := make([]string, colCount)
+			for j, col := range columns {
+				switch {
+				case tsCols[col]:
+					ph[j] = fmt.Sprintf("TO_TIMESTAMP(:%d, 'YYYY-MM-DD HH24:MI:SS.FF6')", argIdx)
+				case dateCols[col]:
+					ph[j] = fmt.Sprintf("TO_DATE(:%d, 'YYYY-MM-DD HH24:MI:SS')", argIdx)
+				default:
+					ph[j] = fmt.Sprintf(":%d", argIdx)
+				}
+				argIdx++
+			}
+			valueParts[i] = "(" + strings.Join(ph, ", ") + ")"
+		}
+
+		query := fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s`,
+			qualifyTable(tableName), quoteIdentifiers(columns), strings.Join(valueParts, ", "))
+
+		args := make([]any, 0, len(batch)*colCount)
+		for _, vals := range batch {
+			args = append(args, vals...)
+		}
+
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			tx.Rollback()
-			return fmt.Errorf("Oracle: 写入数据失败: %w", err)
+			return fmt.Errorf("Oracle: 写入数据失败 (offset=%d, batch=%d): %w", offset, len(batch), err)
 		}
 	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("Oracle: 提交事务失败: %w", err)
 	}
