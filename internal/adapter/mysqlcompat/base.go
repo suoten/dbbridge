@@ -311,6 +311,26 @@ WHERE `+schemaFilter+` AND TABLE_NAME = ?
 		schema.ForeignKeys = append(schema.ForeignKeys, *fkMap[name])
 	}
 
+	// 获取 CHECK 约束（MySQL 8.0.16+）
+	checkRows, err := a.db.QueryContext(ctx, `
+		SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE
+		FROM information_schema.CHECK_CONSTRAINTS cc
+		WHERE cc.CONSTRAINT_SCHEMA = CASE WHEN ? = '' THEN DATABASE() ELSE ? END
+		AND cc.TABLE_NAME = ?
+	`, append(schemaArgs, table)...)
+	if err == nil {
+		for checkRows.Next() {
+			var name, clause string
+			if err := checkRows.Scan(&name, &clause); err == nil {
+				schema.Checks = append(schema.Checks, types.CheckMeta{
+					Name:       name,
+					Definition: clause,
+				})
+			}
+		}
+		checkRows.Close()
+	}
+
 	return schema, nil
 }
 
@@ -492,6 +512,16 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			sb.WriteString(fmt.Sprintf("`%s`", escapeIdent(c)))
 		}
 		sb.WriteString(")")
+	}
+
+	// CHECK 约束（MySQL 8.0.16+）
+	for _, ck := range table.Checks {
+		sb.WriteString(",\n")
+		def := ck.Definition
+		if !strings.HasPrefix(strings.TrimSpace(def), "(") {
+			def = "(" + def + ")"
+		}
+		sb.WriteString(fmt.Sprintf("  CONSTRAINT `%s` CHECK %s", escapeIdent(ck.Name), def))
 	}
 
 	// 唯一索引和普通索引（大文本/二进制列自动加 191 前缀，utf8mb4 下 764 字节，兼容所有 InnoDB 行格式）

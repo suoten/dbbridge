@@ -417,6 +417,21 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		sb.WriteString(")")
 	}
 
+	// CHECK 约束
+	for _, ck := range table.Checks {
+		sb.WriteString(",\n")
+		def := ck.Definition
+		if !strings.HasPrefix(strings.TrimSpace(def), "(") {
+			def = "(" + def + ")"
+		}
+		// Oracle 标识符最长 30 字节
+		ckName := ck.Name
+		if len(ckName) > 30 {
+			ckName = ckName[:30]
+		}
+		sb.WriteString(fmt.Sprintf("  CONSTRAINT %s CHECK %s", oraIdent(ckName), def))
+	}
+
 	sb.WriteString("\n)")
 
 	// 表空间（可选；未配置时使用目标库默认值）

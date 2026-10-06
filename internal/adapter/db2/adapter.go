@@ -294,6 +294,16 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		sb.WriteString(")")
 	}
 
+	// CHECK 约束
+	for _, ck := range table.Checks {
+		sb.WriteString(",\n")
+		def := ck.Definition
+		if !strings.HasPrefix(strings.TrimSpace(def), "(") {
+			def = "(" + def + ")"
+		}
+		sb.WriteString(fmt.Sprintf("  CONSTRAINT \"%s\" CHECK %s", escapeIdent(ck.Name), def))
+	}
+
 	sb.WriteString("\n)")
 	// 目标表空间（Db2: IN 子句，连接后由 SetTablespace 配置）
 	if a.tablespace != "" {

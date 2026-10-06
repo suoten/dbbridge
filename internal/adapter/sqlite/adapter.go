@@ -460,6 +460,16 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		sb.WriteString(")")
 	}
 
+	// CHECK 约束
+	for _, ck := range table.Checks {
+		sb.WriteString(",\n")
+		def := ck.Definition
+		if !strings.HasPrefix(strings.TrimSpace(def), "(") {
+			def = "(" + def + ")"
+		}
+		sb.WriteString(fmt.Sprintf("  CONSTRAINT %s CHECK %s", escapeIdent(ck.Name), def))
+	}
+
 	// 外键内联：SQLite 不支持 ALTER TABLE ADD CONSTRAINT，
 	// 外键必须在建表时定义，否则静默丢失（此前外键完全没被迁移）
 	for _, fk := range table.ForeignKeys {

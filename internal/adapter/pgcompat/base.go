@@ -440,6 +440,26 @@ ORDER BY kcu.ordinal_position
 		return schema, fmt.Errorf("%s: 遍历索引信息失败: %w", a.brand(), err)
 	}
 
+	// CHECK 约束：pg_constraint.conbinode（二进制表达式）可用 pg_get_expr 还原为文本
+	checkRows, err := a.db.QueryContext(ctx, `
+		SELECT conname, pg_get_expr(conbinode, conrelid)
+		FROM pg_constraint
+		WHERE contype = 'c' AND conrelid = $1::regclass
+		ORDER BY conname
+	`, tableName)
+	if err == nil {
+		for checkRows.Next() {
+			var name, def string
+			if err := checkRows.Scan(&name, &def); err == nil {
+				schema.Checks = append(schema.Checks, types.CheckMeta{
+					Name:       name,
+					Definition: def,
+				})
+			}
+		}
+		checkRows.Close()
+	}
+
 	return schema, nil
 }
 
@@ -567,6 +587,16 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			sb.WriteString(fmt.Sprintf("\"%s\"", escapeIdent(c)))
 		}
 		sb.WriteString(")")
+	}
+
+	// CHECK 约束
+	for _, ck := range table.Checks {
+		sb.WriteString(",\n")
+		def := ck.Definition
+		if !strings.HasPrefix(strings.TrimSpace(def), "(") {
+			def = "(" + def + ")"
+		}
+		sb.WriteString(fmt.Sprintf("  CONSTRAINT \"%s\" CHECK %s", escapeIdent(ck.Name), def))
 	}
 
 	sb.WriteString("\n)")

@@ -358,7 +358,53 @@ function Test-Mig($name, $src, $tgt, $ignoreErr=$false) {
     try {
         $report = Invoke-Api "POST" "/api/migrate" $migCfg
         if ($report.tablesTotal -gt 0 -and $report.tablesFailed -eq 0) {
-            Write-TestResult $name "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
+            # 迁移成功后做结构校验：验证目标库表数和每表行数
+            $structOk = $true
+            $structDetail = ""
+            try {
+                # 获取源库表列表
+                $srcTables = Invoke-Api "POST" "/api/tables" $src
+                # 获取目标库表列表
+                $tgtTables = Invoke-Api "POST" "/api/tables" $tgt
+                if ($srcTables -and $tgtTables) {
+                    $srcCount = if ($srcTables.tables) { $srcTables.tables.Count } else { 0 }
+                    $tgtCount = if ($tgtTables.tables) { $tgtTables.tables.Count } else { 0 }
+                    if ($srcCount -gt 0 -and $srcCount -ne $tgtCount) {
+                        $structOk = $false
+                        $structDetail = "table count mismatch: src=$srcCount tgt=$tgtCount"
+                    }
+                }
+            } catch {
+                # /api/tables 可能不存在，跳过结构校验
+            }
+
+            # 数据验证（如果源和目标都支持）
+            if ($structOk -and -not $ignoreErr) {
+                try {
+                    $validateReq = @{
+                        source = $src
+                        target = $tgt
+                        sampleSize = 100
+                    }
+                    $validateReport = Invoke-Api "POST" "/api/validate" $validateReq
+                    if ($validateReport -and $validateReport.tables) {
+                        $totalChecks = $validateReport.tables.Count
+                        $mismatched = ($validateReport.tables | Where-Object { $_.status -ne "match" }).Count
+                        if ($mismatched -gt 0) {
+                            $structOk = $false
+                            $structDetail = "data mismatch: $mismatched/$totalChecks tables"
+                        }
+                    }
+                } catch {
+                    # validate API 可能不存在，跳过
+                }
+            }
+
+            if ($structOk) {
+                Write-TestResult $name "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) rows=$($report.totalRows)"
+            } else {
+                Write-TestResult $name "FAIL" "tables=$($report.tablesTotal) rows=$($report.totalRows) STRUCT: $structDetail"
+            }
         } elseif ($report.tablesTotal -gt 0 -and $report.tablesSuccess -gt 0 -and $ignoreErr) {
             Write-TestResult $name "PASS" "tables=$($report.tablesTotal) success=$($report.tablesSuccess) failed=$($report.tablesFailed) rows=$($report.totalRows) (partial)"
         } elseif ($report.tablesTotal -gt 0 -and $report.tablesSuccess -gt 0) {
