@@ -198,7 +198,8 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		       c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE,
 		       c.ORDINAL_POSITION,
 		       COLUMNPROPERTY(OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)), c.COLUMN_NAME, 'IsIdentity') as is_identity,
-		       CAST(ep.value AS NVARCHAR(MAX)) as comment
+		       CAST(ep.value AS NVARCHAR(MAX)) as comment,
+		       sc.is_computed
 		FROM INFORMATION_SCHEMA.COLUMNS c
 		LEFT JOIN sys.columns sc ON sc.object_id = OBJECT_ID(QUOTENAME(c.TABLE_SCHEMA) + '.' + QUOTENAME(c.TABLE_NAME)) AND sc.name = c.COLUMN_NAME
 		LEFT JOIN sys.extended_properties ep ON ep.major_id = sc.object_id AND ep.minor_id = sc.column_id AND ep.name = 'MS_Description'
@@ -218,17 +219,19 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		var colDefault sql.NullString
 		var maxLen, numPrecision, numScale, ordinal, isIdentity sql.NullInt64
 		var comment sql.NullString
+		var isComputed sql.NullInt64
 
-		if err := rows.Scan(&name, &dataType, &nullable, &colDefault, &maxLen, &numPrecision, &numScale, &ordinal, &isIdentity, &comment); err != nil {
+		if err := rows.Scan(&name, &dataType, &nullable, &colDefault, &maxLen, &numPrecision, &numScale, &ordinal, &isIdentity, &comment, &isComputed); err != nil {
 			return schema, fmt.Errorf("MSSQL: 读取列信息失败: %w", err)
 		}
 
 		col := types.ColumnMeta{
-			Name:     name,
-			DataType: dataType,
-			BaseType: strings.ToUpper(dataType),
-			Nullable: nullable == "YES",
-			Comment:  comment.String,
+			Name:      name,
+			DataType:  dataType,
+			BaseType:  strings.ToUpper(dataType),
+			Nullable:  nullable == "YES",
+			Comment:   comment.String,
+			Generated: isComputed.Valid && isComputed.Int64 == 1,
 		}
 
 		// MSSQL 的 timestamp 类型是 rowversion（8 字节行版本二进制），
@@ -602,7 +605,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		colType := a.MapType(col)
 		sb.WriteString(colType)
 
-		if col.AutoIncrement {
+		if col.AutoIncrement && !col.Generated {
 			sb.WriteString(" IDENTITY(1,1)")
 		}
 
@@ -610,7 +613,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			sb.WriteString(" NOT NULL")
 		}
 
-		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement {
+		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement && !col.Generated {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
 				sb.WriteString(" DEFAULT " + quoted)
 			}

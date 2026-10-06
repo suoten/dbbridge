@@ -262,7 +262,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		if !col.Nullable {
 			sb.WriteString(" NOT NULL")
 		}
-		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement {
+		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement && !col.Generated {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
 				sb.WriteString(" DEFAULT " + quoted)
 			}

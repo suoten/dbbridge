@@ -71,6 +71,7 @@ type ColumnMeta struct {
 	Unsigned      bool    `json:"unsigned,omitempty"` // MySQL 无符号
 	Comment       string  `json:"comment,omitempty"`
 	IsPrimaryKey  bool    `json:"isPrimaryKey"`
+	Generated     bool    `json:"generated,omitempty"` // 生成列（GENERATED ALWAYS AS / COMPUTED），不可显式 INSERT
 }
 
 // IndexMeta 索引的元数据

@@ -191,6 +191,7 @@ WHERE `+schemaFilter+` AND TABLE_NAME = ?
 			IsPrimaryKey:  colKey == "PRI",
 			AutoIncrement: strings.Contains(extra, "auto_increment"),
 			Unsigned:      strings.Contains(strings.ToLower(colType), "unsigned"),
+			Generated:     strings.Contains(strings.ToUpper(extra), "GENERATED"),
 		}
 
 		if defVal.Valid && defVal.String != "" {
@@ -473,11 +474,11 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			sb.WriteString(" NOT NULL")
 		}
 
-		if col.AutoIncrement {
+		if col.AutoIncrement && !col.Generated {
 			sb.WriteString(" AUTO_INCREMENT")
 		}
 
-		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement {
+		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement && !col.Generated {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
 				sb.WriteString(" DEFAULT " + quoted)
 			}

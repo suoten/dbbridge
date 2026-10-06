@@ -16,13 +16,13 @@ func TestFormatDefault(t *testing.T) {
 		{"0.00", "0.00"},
 		{"-12.5", "-12.5"},
 		{"42", "42"},
-		// 常见函数/关键字统一为 SQL 标准大写形式（不带括号）
+		// 常见函数/关键字统一为 SQL 标准形式（跨库兼容）
 		{"CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"},
 		{"current_timestamp()", "CURRENT_TIMESTAMP"},
-		{"NOW()", "NOW"},
+		{"NOW()", "CURRENT_TIMESTAMP"},
 		{"NULL", "NULL"},
 		{"null", "NULL"},
-		{"gen_random_uuid()", "GEN_RANDOM_UUID"},
+		{"gen_random_uuid()", "gen_random_uuid()"},
 		{"LOCALTIME", "LOCALTIME"},
 		// 字符串默认值必须加引号（BUG-7 核心场景）
 		{"pending", "'pending'"},

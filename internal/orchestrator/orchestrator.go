@@ -863,8 +863,16 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 		}
 
 		columns := make([]string, 0, len(schema.Columns))
+		genCount := 0
 		for _, c := range schema.Columns {
+			if c.Generated {
+				genCount++
+				continue // 生成列（GENERATED ALWAYS AS / COMPUTED）由目标库自动计算，不可显式 INSERT
+			}
 			columns = append(columns, c.Name)
+		}
+		if genCount > 0 {
+			o.log("INFO", tableName, fmt.Sprintf("跳过 %d 个生成列（不可显式插入）", genCount))
 		}
 
 		// 获取总行数（失败不阻塞，仅影响进度百分比）

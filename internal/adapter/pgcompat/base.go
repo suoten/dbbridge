@@ -245,7 +245,7 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT column_name, data_type, character_maximum_length,
 		       numeric_precision, numeric_scale, is_nullable,
-		       column_default, ordinal_position
+		       column_default, ordinal_position, is_generated
 		FROM information_schema.columns
 		WHERE `+schemaFilter+` AND table_name = $1
 		ORDER BY ordinal_position
@@ -257,19 +257,21 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 
 	var columns []types.ColumnMeta
 	for rows.Next() {
-		var name, dataType, nullable string
-		var defVal sql.NullString
-		var maxLen, numPrecision, numScale, ordinal sql.NullInt64
+	var name, dataType, nullable string
+	var defVal sql.NullString
+	var maxLen, numPrecision, numScale, ordinal sql.NullInt64
+	var isGenerated string
 
-		if err := rows.Scan(&name, &dataType, &maxLen, &numPrecision, &numScale, &nullable, &defVal, &ordinal); err != nil {
+	if err := rows.Scan(&name, &dataType, &maxLen, &numPrecision, &numScale, &nullable, &defVal, &ordinal, &isGenerated); err != nil {
 			return schema, fmt.Errorf("%s: 读取列信息失败: %w", a.brand(), err)
 		}
 
 		col := types.ColumnMeta{
-			Name:     name,
-			DataType: dataType,
-			BaseType: strings.ToUpper(dataType),
-			Nullable: nullable == "YES",
+			Name:      name,
+			DataType:  dataType,
+			BaseType:  strings.ToUpper(dataType),
+			Nullable:  nullable == "YES",
+			Generated: isGenerated == "ALWAYS" || isGenerated == "YES",
 		}
 
 		if defVal.Valid && defVal.String != "" {
@@ -556,7 +558,7 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			sb.WriteString(" NOT NULL")
 		}
 
-		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement {
+		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement && !col.Generated {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
 				sb.WriteString(" DEFAULT " + quoted)
 			}

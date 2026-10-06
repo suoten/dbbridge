@@ -29,16 +29,24 @@ func FormatDefault(val string) string {
 	}
 	key := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(v, "()")))
 	switch key {
-	case "current_timestamp", "current_date", "current_time", "localtime", "localtimestamp",
-		"now", "uuid", "gen_random_uuid", "sysdate", "curdate", "curtime", "rand", "random",
-		"null", "true", "false":
-		// 返回 SQL 标准形式（不带括号），所有主流数据库均支持
-		// current_timestamp() → CURRENT_TIMESTAMP
-		return strings.ToUpper(key)
-	// 将各方言特有的日期/时间函数统一转换为 SQL 标准的 CURRENT_TIMESTAMP，
-	// 确保目标数据库能正确解析 DEFAULT 子句
-	case "getdate", "getutcdate", "sysutcdatetime", "sysdatetime":
+	case "current_timestamp", "now", "sysdate", "getdate", "getutcdate", "sysutcdatetime", "sysdatetime":
+		// SQL 标准 CURRENT_TIMESTAMP，所有主流数据库均支持做 DEFAULT 值
 		return "CURRENT_TIMESTAMP"
+	case "current_date", "curdate":
+		return "CURRENT_DATE"
+	case "current_time", "curtime":
+		return "CURRENT_TIME"
+	case "localtime", "localtimestamp":
+		return strings.ToUpper(key)
+	case "null", "true", "false":
+		return strings.ToUpper(key)
+	case "uuid", "gen_random_uuid":
+		// UUID 函数各方言不同（PG gen_random_uuid()、MySQL UUID()、MSSQL NEWID()），
+		// 不统一映射——保留原值让适配器自行处理
+		return v
+	case "rand", "random":
+		// 各方言不同（MySQL RAND()、PG RANDOM()），保留原值
+		return v
 	}
 	if strings.HasPrefix(v, "'") {
 		return v
