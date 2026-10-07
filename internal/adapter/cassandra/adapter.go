@@ -446,12 +446,9 @@ func (a *Adapter) ReadData(ctx context.Context, tableName string, offset, limit 
 		}
 		row := make(types.Row)
 		for k, v := range rowData {
-			// gocql 对 text/ascii/blob 等类型返回 []byte，转为 string
-			if b, ok := v.([]byte); ok {
-				row[k] = string(b)
-			} else {
-				row[k] = v
-			}
+			// 保留 []byte 原始类型，不做 string 转换
+			// gocql 对 blob/list 类型返回 []byte，目标库驱动可直接处理
+			row[k] = v
 		}
 		result = append(result, row)
 		if len(result) >= limit {
@@ -475,11 +472,9 @@ func (a *Adapter) ReadDataKeyset(ctx context.Context, tableName, keyColumn strin
 		for iter.MapScan(rowData) {
 			row := make(types.Row)
 			for k, v := range rowData {
-				if b, ok := v.([]byte); ok {
-					row[k] = string(b)
-				} else {
-					row[k] = v
-				}
+				// 保留 []byte 原始类型，不做 string 转换
+				// gocql 对 blob/list 类型返回 []byte，目标库驱动可直接处理
+				row[k] = v
 			}
 			result = append(result, row)
 			rowData = make(map[string]any)

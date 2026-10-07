@@ -884,6 +884,24 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 			batchSize = 5000
 		}
 
+		// 大字段自适应：表含 BLOB/TEXT/JSON/CLOB 列时减小批量，避免 OOM。
+		// 每行可能携带数 MB 的 LOB 数据，5000 行 × 1MB = 5GB 会触发 OOM。
+		// 降至 200 行：200 × 1MB ≈ 200MB，可控。
+		hasLOB := false
+		for _, c := range schema.Columns {
+			switch typeconv.Normalize(c.BaseType) {
+			case typeconv.KindBlob, typeconv.KindText, typeconv.KindJSON:
+				hasLOB = true
+			}
+			if hasLOB {
+				break
+			}
+		}
+		if hasLOB && batchSize > 200 {
+			o.log("INFO", tableName, fmt.Sprintf("检测到大字段列(LOB)，批量大小 %d → 200 以控制内存", batchSize))
+			batchSize = 200
+		}
+
 		// 主键游标分页：单列主键时使用 keyset（深翻页 O(1)）；
 		// 无主键但有单列非空唯一索引时也用 keyset；都无则回退 OFFSET
 		// 复合主键不能只用第一列做 keyset（重复值会跳行），必须回退
@@ -971,10 +989,15 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 				}
 			}
 
-			if err := o.targetAdapter.WriteData(ctx, targetName, columns, rows); err != nil {
-				return processed, fmt.Errorf("写入数据失败 (已处理 %d 行): %w", processed, err)
+			// 物理行ID：在写入前提取并移除，避免污染目标数据
+			if usePhysRowID && len(rows) > 0 {
+				lastPhysRowID = rows[len(rows)-1]["_physrowid"]
+				for i := range rows {
+					delete(rows[i], "_physrowid")
+				}
 			}
 
+			// keyset 游标：在写入前提取，避免 WriteData 实现意外修改 row 数据
 			if useKeyset && len(rows) > 0 {
 				lastKey = rows[len(rows)-1][pkCol]
 				// 主键列含 NULL 时游标无法推进，SQL 会退化为无条件的全表首查导致死循环
@@ -982,14 +1005,11 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 					return processed, fmt.Errorf("主键列 %s 存在 NULL 值，无法使用游标分页，请为该列补充 NOT NULL 约束或去除 NULL 数据后重试", pkCol)
 				}
 			}
-			if usePhysRowID && len(rows) > 0 {
-				// 物理行ID存储在特殊列名 _physrowid 中
-				lastPhysRowID = rows[len(rows)-1]["_physrowid"]
-				// 从数据行中移除物理行ID列，不写入目标库
-				for i := range rows {
-					delete(rows[i], "_physrowid")
-				}
+
+			if err := o.targetAdapter.WriteData(ctx, targetName, columns, rows); err != nil {
+				return processed, fmt.Errorf("写入数据失败 (已处理 %d 行): %w", processed, err)
 			}
+
 			processed += int64(len(rows))
 			offset += len(rows)
 			o.reportProgress(ctx, "data", tableName, processed, totalRows)
