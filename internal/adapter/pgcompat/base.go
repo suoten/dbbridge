@@ -701,7 +701,7 @@ func (a *Base) WriteData(ctx context.Context, tableName string, columns []string
 		for j, col := range columns {
 			if val, ok := row[col]; ok {
 				if t, isTime := val.(time.Time); isTime {
-					val = t.Format("2006-01-02 15:04:05.999")
+					val = t.Format("2006-01-02 15:04:05.999999")
 				}
 				values[j] = val
 			} else {

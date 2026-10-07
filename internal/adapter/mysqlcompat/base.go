@@ -616,22 +616,22 @@ func (a *Base) WriteData(ctx context.Context, tableName string, columns []string
 		return nil
 	}
 
-	// 预处理 time.Time 值，统一格式化为标准 datetime
-	processedRows := make([][]any, len(rows))
-	for i, row := range rows {
-		values := make([]any, len(columns))
-		for j, col := range columns {
-			if val, ok := row[col]; ok {
-				if t, isTime := val.(time.Time); isTime {
-					val = t.Format("2006-01-02 15:04:05.999")
+		// 预处理 time.Time 值，统一格式化为标准 datetime（保留微秒精度）
+		processedRows := make([][]any, len(rows))
+		for i, row := range rows {
+			values := make([]any, len(columns))
+			for j, col := range columns {
+				if val, ok := row[col]; ok {
+					if t, isTime := val.(time.Time); isTime {
+						val = t.Format("2006-01-02 15:04:05.999999")
+					}
+					values[j] = val
+				} else {
+					values[j] = nil
 				}
-				values[j] = val
-			} else {
-				values[j] = nil
 			}
+			processedRows[i] = values
 		}
-		processedRows[i] = values
-	}
 
 	oneRowPlaceholders := "(" + strings.Repeat("?,", len(columns)-1) + "?)"
 

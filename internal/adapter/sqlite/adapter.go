@@ -632,7 +632,7 @@ func (a *Adapter) WriteData(ctx context.Context, tableName string, columns []str
 				// time.Time 直写会以 Go 字符串形式落入 TEXT 列，统一转为标准 datetime 格式；
 				// .999 在毫秒为零时省略小数部分，非零时保留毫秒，避免精度静默丢失
 				if t, isTime := val.(time.Time); isTime {
-					val = t.Format("2006-01-02 15:04:05.999")
+					val = t.Format("2006-01-02 15:04:05.999999")
 				}
 				values[j] = val
 			} else {
