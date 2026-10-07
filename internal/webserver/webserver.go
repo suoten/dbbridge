@@ -118,8 +118,12 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"success": "false", "error": msg})
 }
 
+// maxBodySize 单次请求体上限（10 MB，SQL 脚本转换可能较大）
+const maxBodySize = 10 << 20
+
 // decodeBody 解析请求体 JSON 到 v
 func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		writeError(w, http.StatusBadRequest, "请求体 JSON 解析失败: "+err.Error())
 		return false
@@ -135,15 +139,34 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
+// requireMethod 检查请求方法是否为 POST，否则返回 405
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method != method {
+		w.Header().Set("Allow", method)
+		writeError(w, http.StatusMethodNotAllowed, "仅支持 "+method+" 方法")
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"version": s.version})
 }
 
-func (s *Server) handleDatabases(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleDatabases(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"databases": s.conn.GetSupportedDatabases()})
 }
 
 func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var config types.ConnectionConfig
 	if !decodeBody(w, r, &config) {
 		return
@@ -159,6 +182,9 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var config types.ConnectionConfig
 	if !decodeBody(w, r, &config) {
 		return
@@ -174,6 +200,9 @@ func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSchema(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req struct {
 		Config types.ConnectionConfig `json:"config"`
 		Table  string                 `json:"table"`
@@ -192,6 +221,9 @@ func (s *Server) handleSchema(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMigrate(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var config types.MigrationConfig
 	if !decodeBody(w, r, &config) {
 		return
@@ -213,15 +245,24 @@ func (s *Server) handleMigrate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
-func (s *Server) handleCancel(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": s.mig.Cancel()})
 }
 
-func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"running": s.mig.IsRunning()})
 }
 
 func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	// 请求体为 {"config": {...}}（与 /api/backups/restore、/api/backups/delete 一致，
 	// 也与 README API 文档和 Web 模式桥接 shim 的约定一致）
 	var req struct {
@@ -241,6 +282,9 @@ func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req struct {
 		Config      types.ConnectionConfig `json:"config"`
 		BackupName  string                 `json:"backupName"`
@@ -265,6 +309,9 @@ func (s *Server) handleRestoreBackup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req struct {
 		Config     types.ConnectionConfig `json:"config"`
 		BackupName string                 `json:"backupName"`
@@ -283,6 +330,9 @@ func (s *Server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
 
 // handleConvertSQL SQL 脚本方言转换
 func (s *Server) handleConvertSQL(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req service.ConvertSQLRequest
 	if !decodeBody(w, r, &req) {
 		return
@@ -292,6 +342,9 @@ func (s *Server) handleConvertSQL(w http.ResponseWriter, r *http.Request) {
 
 // handleLintSQL SQL 方言兼容性体检
 func (s *Server) handleLintSQL(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req struct {
 		SourceDialect string `json:"sourceDialect"`
 		TargetDialect string `json:"targetDialect"`
@@ -315,6 +368,9 @@ func (s *Server) handleLintSQL(w http.ResponseWriter, r *http.Request) {
 
 // handleValidate 切换前数据校验（只读不动数据）
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req service.ValidateRequest
 	if !decodeBody(w, r, &req) {
 		return
@@ -327,6 +383,9 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 
 // handleGuide 迁移适配指南（只读源库元数据 + 转换预演）
 func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req struct {
 		Config        types.ConnectionConfig `json:"config"`
 		TargetDialect string                 `json:"targetDialect"`
@@ -342,6 +401,9 @@ func (s *Server) handleGuide(w http.ResponseWriter, r *http.Request) {
 
 // handleCompat 迁移后结构兼容性检查（只读）
 func (s *Server) handleCompat(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req service.CheckCompatParams
 	if !decodeBody(w, r, &req) {
 		return
@@ -353,6 +415,9 @@ func (s *Server) handleCompat(w http.ResponseWriter, r *http.Request) {
 
 // handleConnStr 连接字符串生成（纯函数不触库）
 func (s *Server) handleConnStr(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 	var req types.ConnectionConfig
 	if !decodeBody(w, r, &req) {
 		return
