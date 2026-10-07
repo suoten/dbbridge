@@ -388,7 +388,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 				sb.WriteString(" DEFAULT " + d)
 			}
 		}
-		if !col.Nullable {
+		if !col.Nullable && !col.Generated {
 			sb.WriteString(" NOT NULL")
 		}
 	}

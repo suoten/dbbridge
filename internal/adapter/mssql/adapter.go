@@ -609,7 +609,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			sb.WriteString(" IDENTITY(1,1)")
 		}
 
-		if !col.Nullable {
+		if !col.Nullable && !col.Generated {
 			sb.WriteString(" NOT NULL")
 		}
 

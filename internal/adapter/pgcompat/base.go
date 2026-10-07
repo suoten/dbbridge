@@ -554,7 +554,9 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		sb.WriteString(fmt.Sprintf("\"%s\" ", escapeIdent(col.Name)))
 		sb.WriteString(a.MapType(col))
 
-		if !col.Nullable {
+		// 生成列在目标库创建为普通列（无法还原生成表达式），数据迁移时跳过写入。
+		// 强制允许 NULL，避免 NOT NULL 约束导致 INSERT 失败。
+		if !col.Nullable && !col.Generated {
 			sb.WriteString(" NOT NULL")
 		}
 

@@ -441,9 +441,9 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		// 类型映射
 		sb.WriteString(a.MapType(col))
 
-		if !col.Nullable {
-			sb.WriteString(" NOT NULL")
-		}
+	if !col.Nullable && !col.Generated {
+		sb.WriteString(" NOT NULL")
+	}
 
 		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement && !col.Generated {
 			if quoted := typeconv.FormatDefault(*col.DefaultValue); quoted != "" {
