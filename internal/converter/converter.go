@@ -100,9 +100,7 @@ func (c *Converter) convertCreateIndex(ddl string) (string, error) {
 	switch c.targetDialect {
 	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora, types.Dameng:
 		sb.WriteString(fmt.Sprintf("`%s` ON `%s` (", idx.Name, table))
-	case types.PostgreSQL:
-		sb.WriteString(fmt.Sprintf("\"%s\" ON \"%s\" (", idx.Name, table))
-	case types.SQLite:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB, types.SQLite:
 		sb.WriteString(fmt.Sprintf("\"%s\" ON \"%s\" (", idx.Name, table))
 	default:
 		sb.WriteString(fmt.Sprintf("%s ON %s (", idx.Name, table))
