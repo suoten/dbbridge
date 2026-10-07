@@ -109,7 +109,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 	schemaArgs := []any{schemaName, schemaName}
 
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT COLNAME, TYPENAME, LENGTH, SCALE, NULLS, DEFAULT, COLNO
+		SELECT COLNAME, TYPENAME, LENGTH, SCALE, NULLS, DEFAULT, COLNO, GENERATED
 		FROM SYSCAT.COLUMNS
 		WHERE TABNAME = UPPER(?) AND `+schemaFilter+`
 		ORDER BY COLNO
@@ -125,14 +125,16 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		var length, scale sql.NullInt64
 		var defVal sql.NullString
 		var colNo sql.NullInt64
-		if err := rows.Scan(&name, &dataType, &length, &scale, &nullable, &defVal, &colNo); err != nil {
+		var generated string
+		if err := rows.Scan(&name, &dataType, &length, &scale, &nullable, &defVal, &colNo, &generated); err != nil {
 			return schema, fmt.Errorf("IBM Db2: scan column failed: %w", err)
 		}
 		col := types.ColumnMeta{
-			Name:     name,
-			DataType: dataType,
-			BaseType: strings.ToUpper(dataType),
-			Nullable: nullable == "Y",
+			Name:      name,
+			DataType:  dataType,
+			BaseType:  strings.ToUpper(dataType),
+			Nullable:  nullable == "Y",
+			Generated: generated == "Y",
 		}
 		if length.Valid {
 			l := int(length.Int64)
@@ -259,7 +261,7 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		sb.WriteString("  ")
 		sb.WriteString(fmt.Sprintf(`"%s" `, escapeIdent(col.Name)))
 		sb.WriteString(a.MapType(col))
-		if !col.Nullable {
+		if !col.Nullable && !col.Generated {
 			sb.WriteString(" NOT NULL")
 		}
 		if col.DefaultValue != nil && *col.DefaultValue != "" && !col.AutoIncrement && !col.Generated {
