@@ -200,6 +200,7 @@ func (s *SQLService) GenerateConnStrings(cfg types.ConnectionConfig) *ConnStrRes
 		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:mysql://%s:%d/%s?useSSL=true&requireSSL=true\nuser=%s\npassword=%s", host, p, db, user, pass)
 		tpl["Python (SQLAlchemy)"] = fmt.Sprintf("mysql+pymysql://%s:%s@%s:%d/%s?ssl_enabled=true", user, esc(pass), host, p, db)
 		tpl["Go (database/sql)"] = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?tls=true&parseTime=True&loc=Local", user, esc(pass), host, p, db)
+		tpl["PHP (PDO)"] = fmt.Sprintf("new PDO('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', '%s', '%s', [PDO::MYSQL_ATTR_SSL_CA => '/path/to/rds-combined-ca-bundle.pem']);", host, p, db, user, pass)
 		tpl["Node.js (mysql2)"] = fmt.Sprintf("{ host: '%s', port: %d, user: '%s', password: '%s', database: '%s', ssl: {} }", host, p, user, pass, db)
 		notes = append(notes, "Aurora (MySQL 兼容版) 使用 MySQL 协议，建议启用 SSL/TLS")
 
@@ -208,6 +209,7 @@ func (s *SQLService) GenerateConnStrings(cfg types.ConnectionConfig) *ConnStrRes
 		tpl["Java (JDBC)"] = fmt.Sprintf("jdbc:mysql://%s:%d/%s?useSSL=true\nuser=%s\npassword=%s", host, p, db, user, pass)
 		tpl["Python (SQLAlchemy)"] = fmt.Sprintf("mysql+pymysql://%s:%s@%s:%d/%s", user, esc(pass), host, p, db)
 		tpl["Go (database/sql)"] = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=True&loc=Local", user, esc(pass), host, p, db)
+		tpl["PHP (PDO)"] = fmt.Sprintf("new PDO('mysql:host=%s;port=%d;dbname=%s;charset=utf8mb4', '%s', '%s');", host, p, db, user, pass)
 		tpl["Node.js (mysql2)"] = fmt.Sprintf("{ host: '%s', port: %d, user: '%s', password: '%s', database: '%s' }", host, p, user, pass, db)
 		notes = append(notes, "PolarDB (MySQL 兼容版) 使用 MySQL 协议")
 
