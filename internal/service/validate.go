@@ -339,10 +339,10 @@ func valuesEqual(a, b any) bool {
 			return ta.Equal(tb)
 		}
 		// 源是 time.Time、目标是字符串（常见：目标 TEXT/驱动差异）
-		return ta.Format("2006-01-02 15:04:05.999") == normalizeTimeString(fmt.Sprintf("%v", b))
+		return ta.Format("2006-01-02 15:04:05.999999") == normalizeTimeString(fmt.Sprintf("%v", b))
 	}
 	if tb, ok := b.(time.Time); ok {
-		return tb.Format("2006-01-02 15:04:05.999") == normalizeTimeString(fmt.Sprintf("%v", a))
+		return tb.Format("2006-01-02 15:04:05.999999") == normalizeTimeString(fmt.Sprintf("%v", a))
 	}
 
 	// 数值比较（int/int64/float64/uint 等全部统一）
