@@ -515,10 +515,12 @@ func (a *Adapter) formatOracleDefault(col types.ColumnMeta, val string) string {
 	return quoted
 }
 
+// zeroDateDigitRe 预编译正则，避免每次调用 isZeroDate 时重新编译
+var zeroDateDigitRe = regexp.MustCompile(`\d+`)
+
 // isZeroDate 判断是否为日期零值（'0000-00-00' / '0000-00-00 00:00:00' 等）
 func isZeroDate(lit string) bool {
-	re := regexp.MustCompile(`\d+`)
-	all := re.FindAllString(lit, -1)
+	all := zeroDateDigitRe.FindAllString(lit, -1)
 	if len(all) == 0 {
 		return false
 	}
