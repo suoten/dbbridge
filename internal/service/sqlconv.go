@@ -45,7 +45,7 @@ type ConvertSQLResult struct {
 // IsMySQLDialect 判断是否 MySQL 系方言（DDL 结构化解析仅对 MySQL 系可靠）
 func IsMySQLDialect(t types.DatabaseType) bool {
 	switch t {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora:
 		return true
 	}
 	return false

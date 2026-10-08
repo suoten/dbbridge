@@ -240,7 +240,7 @@ func severityRank(sev string) int {
 
 func isPGFamilyDialect(t types.DatabaseType) bool {
 	switch t {
-	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB:
+	case types.PostgreSQL, types.OpenGauss, types.KingbaseES, types.CockroachDB, types.TimescaleDB:
 		return true
 	}
 	return false
@@ -248,7 +248,7 @@ func isPGFamilyDialect(t types.DatabaseType) bool {
 
 func isMySQLFamilyDialect(t types.DatabaseType) bool {
 	switch t {
-	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase:
+	case types.MySQL, types.MariaDB, types.TiDB, types.OceanBase, types.PolarDB, types.Aurora:
 		return true
 	}
 	return false
