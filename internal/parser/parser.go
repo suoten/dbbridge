@@ -284,14 +284,25 @@ func isInQuote(s string) bool {
 		ch := s[i]
 		switch ch {
 		case '\'':
+			// 反斜杠转义（MySQL 风格 \'）
 			if i > 0 && s[i-1] == '\\' {
 				continue
 			}
 			if !inDouble && !inBacktick {
+				// '' 转义（SQL 标准风格）：两个连续单引号在字符串内表示字面量引号，
+				// 不改变引号开关状态。跳过第二个引号以正确维护状态。
+				if inSingle && i+1 < len(s) && s[i+1] == '\'' {
+					i++ // 跳过转义的引号
+					continue
+				}
 				inSingle = !inSingle
 			}
 		case '"':
 			if !inSingle && !inBacktick {
+				if inDouble && i+1 < len(s) && s[i+1] == '"' {
+					i++
+					continue
+				}
 				inDouble = !inDouble
 			}
 		case '`':
