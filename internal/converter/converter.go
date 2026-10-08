@@ -287,16 +287,45 @@ func extractTableName(ddl string) string {
 }
 
 // extractTableBody 提取括号内的定义体
+// 注意：需跳过字符串字面量内的括号（如 CHECK(name LIKE '%(') 中的括号）
 func extractTableBody(ddl string) string {
 	start := strings.Index(ddl, "(")
 	if start < 0 {
 		return ""
 	}
 
-	// 找到匹配的右括号
+	// 找到匹配的右括号（跳过字符串字面量内的括号）
 	depth := 0
+	inSingleQuote := false
+	inDoubleQuote := false
+	inBacktick := false
 	for i := start; i < len(ddl); i++ {
-		switch ddl[i] {
+		ch := ddl[i]
+		if inSingleQuote {
+			if ch == '\'' && (i == 0 || ddl[i-1] != '\\') {
+				inSingleQuote = false
+			}
+			continue
+		}
+		if inDoubleQuote {
+			if ch == '"' {
+				inDoubleQuote = false
+			}
+			continue
+		}
+		if inBacktick {
+			if ch == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+		case '"':
+			inDoubleQuote = true
+		case '`':
+			inBacktick = true
 		case '(':
 			depth++
 		case ')':
@@ -361,11 +390,12 @@ func splitColumnDefs(body string) []string {
 }
 
 // isConstraint 判断是否是约束定义
+// 注意：KEY/INDEX 需后随空白才判定，避免误匹配 KEYBOARD、INDExed 等列名
 func isConstraint(upper string) bool {
 	return strings.HasPrefix(upper, "PRIMARY KEY") ||
 		strings.HasPrefix(upper, "UNIQUE KEY") ||
 		strings.HasPrefix(upper, "UNIQUE INDEX") ||
-		strings.HasPrefix(upper, "UNIQUE") ||
+		strings.HasPrefix(upper, "UNIQUE ") ||
 		strings.HasPrefix(upper, "KEY ") ||
 		strings.HasPrefix(upper, "INDEX ") ||
 		strings.HasPrefix(upper, "CONSTRAINT") ||
@@ -373,6 +403,7 @@ func isConstraint(upper string) bool {
 }
 
 // extractColumnList 从约束中提取列名列表
+// 注意：需处理括号内的逗号（如函数索引 func(col1, col2)）
 func extractColumnList(def string) []string {
 	start := strings.Index(def, "(")
 	if start < 0 {
@@ -383,11 +414,29 @@ func extractColumnList(def string) []string {
 		return nil
 	}
 	inner := def[start+1 : end]
-	// 分割逗号
-	cols := strings.Split(inner, ",")
+	// 分割逗号（忽略括号内的逗号）
+	var cols []string
+	depth := 0
+	colStart := 0
+	for i := 0; i < len(inner); i++ {
+		ch := inner[i]
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				cols = append(cols, strings.TrimSpace(inner[colStart:i]))
+				colStart = i + 1
+			}
+		}
+	}
+	if colStart < len(inner) {
+		cols = append(cols, strings.TrimSpace(inner[colStart:]))
+	}
 	var result []string
 	for _, c := range cols {
-		c = strings.TrimSpace(c)
 		// 去掉引号
 		c = strings.Trim(c, "`\"")
 		// 去掉长度限定（如 column_name(10)）
@@ -496,9 +545,20 @@ func parseColumnDef(def string, dialect types.DatabaseType) *types.ColumnMeta {
 		rest := strings.TrimSpace(def[idx+7:])
 		// 提取默认值
 		if strings.HasPrefix(rest, "'") {
-			end := strings.Index(rest[1:], "'")
-			if end >= 0 {
-				val := rest[:2+end]
+			// 处理 SQL 转义单引号（''），找到真正的结束引号
+			j := 1
+			for j < len(rest) {
+				if rest[j] == '\'' {
+					if j+1 < len(rest) && rest[j+1] == '\'' {
+						j += 2 // 跳过转义的 ''
+						continue
+					}
+					break
+				}
+				j++
+			}
+			if j < len(rest) {
+				val := rest[:j+1] // 含两端引号
 				col.DefaultValue = &val
 			}
 		} else {

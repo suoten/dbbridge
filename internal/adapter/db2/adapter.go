@@ -184,6 +184,102 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		}
 	}
 
+	// 获取二级索引（SYSCAT.INDEXES + SYSCAT.INDEXCOLUSE）
+	idxRows, err := a.db.QueryContext(ctx, `
+		SELECT i.INDNAME, ic.COLNAME, i.UNIQUERULE
+		FROM SYSCAT.INDEXES i
+		JOIN SYSCAT.INDEXCOLUSE ic ON i.INDSCHEMA = ic.INDSCHEMA AND i.INDNAME = ic.INDNAME
+		WHERE i.TABNAME = UPPER(?) AND i.TABSCHEMA = CASE WHEN ? = '' THEN CURRENT SCHEMA ELSE UPPER(?) END
+		AND i.INDNAME NOT IN (
+			SELECT CONSTNAME FROM SYSCAT.REFERENCES
+			WHERE TABNAME = i.TABNAME
+		)
+		AND i.UNIQUERULE != 'P'
+		ORDER BY i.INDNAME, ic.COLSEQ
+	`, table, schemaName, schemaName)
+	if err == nil {
+		idxMap := make(map[string]*types.IndexMeta)
+		var idxOrder []string
+		for idxRows.Next() {
+			var idxName, colName, uniqueRule string
+			if err := idxRows.Scan(&idxName, &colName, &uniqueRule); err != nil {
+				break
+			}
+			if _, ok := idxMap[idxName]; !ok {
+				idxMap[idxName] = &types.IndexMeta{
+					Name:     idxName,
+					IsUnique: uniqueRule == "U",
+				}
+				idxOrder = append(idxOrder, idxName)
+			}
+			idxMap[idxName].Columns = append(idxMap[idxName].Columns, colName)
+		}
+		idxRows.Close()
+		for _, name := range idxOrder {
+			schema.Indexes = append(schema.Indexes, *idxMap[name])
+		}
+	}
+
+	// 获取外键
+	fkRows, err := a.db.QueryContext(ctx, `
+		SELECT r.CONSTNAME, k.COLNAME, r.REFTABNAME, rk.COLNAME,
+		       r.DELETERULE, r.UPDATERULE
+		FROM SYSCAT.REFERENCES r
+		JOIN SYSCAT.KEYCOLUSE k ON r.CONSTNAME = k.CONSTNAME AND r.TABSCHEMA = k.TABSCHEMA AND r.TABNAME = k.TABNAME
+		JOIN SYSCAT.KEYCOLUSE rk ON r.REFCONSTNAME = rk.CONSTNAME AND r.REFTABSCHEMA = rk.TABSCHEMA AND r.REFTABNAME = rk.TABNAME
+		WHERE r.TABNAME = UPPER(?) AND r.TABSCHEMA = CASE WHEN ? = '' THEN CURRENT SCHEMA ELSE UPPER(?) END
+		ORDER BY r.CONSTNAME, k.COLSEQ
+	`, table, schemaName, schemaName)
+	if err == nil {
+		fkMap := make(map[string]*types.ForeignKeyMeta)
+		var fkOrder []string
+		for fkRows.Next() {
+			var cname, colName, refTable, refCol string
+			var onDel, onUpd sql.NullString
+			if err := fkRows.Scan(&cname, &colName, &refTable, &refCol, &onDel, &onUpd); err != nil {
+				break
+			}
+			if _, ok := fkMap[cname]; !ok {
+				fk := &types.ForeignKeyMeta{Name: cname, RefTable: refTable}
+				if onDel.Valid {
+					fk.OnDelete = strings.ToLower(onDel.String)
+				}
+				if onUpd.Valid {
+					fk.OnUpdate = strings.ToLower(onUpd.String)
+				}
+				fkMap[cname] = fk
+				fkOrder = append(fkOrder, cname)
+			}
+			fkMap[cname].Columns = append(fkMap[cname].Columns, colName)
+			fkMap[cname].RefColumns = append(fkMap[cname].RefColumns, refCol)
+		}
+		fkRows.Close()
+		for _, name := range fkOrder {
+			schema.ForeignKeys = append(schema.ForeignKeys, *fkMap[name])
+		}
+	}
+
+	// 获取 CHECK 约束
+	checkRows, err := a.db.QueryContext(ctx, `
+		SELECT c.CONSTNAME, c.TEXT
+		FROM SYSCAT.CHECKS c
+		WHERE c.TABNAME = UPPER(?) AND c.TABSCHEMA = CASE WHEN ? = '' THEN CURRENT SCHEMA ELSE UPPER(?) END
+		ORDER BY c.CONSTNAME
+	`, table, schemaName, schemaName)
+	if err == nil {
+		for checkRows.Next() {
+			var name string
+			var def sql.NullString
+			if err := checkRows.Scan(&name, &def); err == nil && def.Valid {
+				schema.Checks = append(schema.Checks, types.CheckMeta{
+					Name:       name,
+					Definition: def.String,
+				})
+			}
+		}
+		checkRows.Close()
+	}
+
 	return schema, nil
 }
 

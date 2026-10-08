@@ -100,6 +100,11 @@ func (a *Base) Connect(ctx context.Context, config types.ConnectionConfig) error
 		return fmt.Errorf("%s: 构造连接串失败: %w", a.brand(), err)
 	}
 	db.SetMaxOpenConns(10)
+	// sql.Open 不实际建连，用 Ping 立刻暴露认证/网络/数据库不存在等错误
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return fmt.Errorf("%s: 连接失败: %w", a.brand(), err)
+	}
 	a.db = db
 	return nil
 }
@@ -403,7 +408,7 @@ ORDER BY kcu.ordinal_position
 		schema.ForeignKeys = append(schema.ForeignKeys, *fkIndex[name])
 	}
 
-	// 获取索引
+	// 获取索引（schema 过滤与列/主键查询一致，支持限定名）
 	idxRows, err := a.db.QueryContext(ctx, `
 		SELECT i.relname as index_name,
 		       array_agg(a.attname ORDER BY x.n),
@@ -416,10 +421,10 @@ ORDER BY kcu.ordinal_position
 			SELECT unnest(ix.indkey) AS attnum, generate_subscripts(ix.indkey, 1) AS n
 		) x
 		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = x.attnum
-		WHERE t.relname = $1 AND n.nspname = 'public'
+		WHERE t.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
 		AND NOT ix.indisprimary
 		GROUP BY i.relname, ix.indisunique
-	`, tableName)
+	`, table, schemaName)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询索引信息失败: %w", a.brand(), err)
 	}
@@ -443,12 +448,17 @@ ORDER BY kcu.ordinal_position
 	}
 
 	// CHECK 约束：pg_constraint.conbinode（二进制表达式）可用 pg_get_expr 还原为文本
+	// 使用限定名构造 regclass，避免 search_path 不含目标 schema 时转型失败
+	checkRef := `"` + escapeIdent(table) + `"`
+	if schemaName != "" {
+		checkRef = `"` + escapeIdent(schemaName) + `".` + checkRef
+	}
 	checkRows, err := a.db.QueryContext(ctx, `
 		SELECT conname, pg_get_expr(conbinode, conrelid)
 		FROM pg_constraint
-		WHERE contype = 'c' AND conrelid = $1::regclass
+		WHERE contype = 'c' AND conrelid = `+checkRef+`::regclass
 		ORDER BY conname
-	`, tableName)
+	`)
 	if err == nil {
 		for checkRows.Next() {
 			var name, def string

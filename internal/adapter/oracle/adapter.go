@@ -289,6 +289,106 @@ ORDER BY COLUMN_ID
 		}
 	}
 
+	// 获取二级索引（ALL_IND_COLUMNS + ALL_INDEXES）
+	idxRows, err := a.db.QueryContext(ctx, `
+SELECT i.INDEX_NAME, ic.COLUMN_NAME, i.UNIQUENESS
+FROM ALL_INDEXES i
+JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER
+WHERE i.TABLE_OWNER = NVL(:1, USER) AND i.TABLE_NAME = UPPER(:2)
+AND i.INDEX_NAME NOT IN (
+	SELECT c.CONSTRAINT_NAME FROM ALL_CONSTRAINTS c
+	WHERE c.OWNER = i.TABLE_OWNER AND c.TABLE_NAME = i.TABLE_NAME
+	AND c.CONSTRAINT_TYPE = 'P'
+)
+ORDER BY i.INDEX_NAME, ic.COLUMN_POSITION
+`, schemaName, table)
+	if err == nil {
+		idxMap := make(map[string]*types.IndexMeta)
+		var idxOrder []string
+		for idxRows.Next() {
+			var idxName, colName, uniqueness string
+			if err := idxRows.Scan(&idxName, &colName, &uniqueness); err != nil {
+				break
+			}
+			if _, ok := idxMap[idxName]; !ok {
+				idxMap[idxName] = &types.IndexMeta{
+					Name:     idxName,
+					IsUnique: uniqueness == "UNIQUE",
+				}
+				idxOrder = append(idxOrder, idxName)
+			}
+			idxMap[idxName].Columns = append(idxMap[idxName].Columns, colName)
+		}
+		idxRows.Close()
+		for _, name := range idxOrder {
+			schema.Indexes = append(schema.Indexes, *idxMap[name])
+		}
+	}
+
+	// 获取外键
+	fkRows, err := a.db.QueryContext(ctx, `
+SELECT c.CONSTRAINT_NAME, cc.COLUMN_NAME, r.TABLE_NAME, rc.COLUMN_NAME,
+       c.DELETE_RULE, c.UPDATE_RULE
+FROM ALL_CONSTRAINTS c
+JOIN ALL_CONS_COLUMNS cc ON c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME AND c.OWNER = cc.OWNER
+JOIN ALL_CONSTRAINTS r ON c.R_CONSTRAINT_NAME = r.CONSTRAINT_NAME AND c.R_OWNER = r.OWNER
+JOIN ALL_CONS_COLUMNS rc ON r.CONSTRAINT_NAME = rc.CONSTRAINT_NAME AND r.OWNER = rc.OWNER
+WHERE c.OWNER = NVL(:1, USER) AND c.TABLE_NAME = UPPER(:2)
+AND c.CONSTRAINT_TYPE = 'R'
+ORDER BY c.CONSTRAINT_NAME, cc.POSITION
+`, schemaName, table)
+	if err == nil {
+		fkMap := make(map[string]*types.ForeignKeyMeta)
+		var fkOrder []string
+		for fkRows.Next() {
+			var cname, colName, refTable, refCol string
+			var onDel, onUpd sql.NullString
+			if err := fkRows.Scan(&cname, &colName, &refTable, &refCol, &onDel, &onUpd); err != nil {
+				break
+			}
+			if _, ok := fkMap[cname]; !ok {
+				fk := &types.ForeignKeyMeta{Name: cname, RefTable: refTable}
+				if onDel.Valid {
+					fk.OnDelete = strings.ToLower(onDel.String)
+				}
+				if onUpd.Valid {
+					fk.OnUpdate = strings.ToLower(onUpd.String)
+				}
+				fkMap[cname] = fk
+				fkOrder = append(fkOrder, cname)
+			}
+			fkMap[cname].Columns = append(fkMap[cname].Columns, colName)
+			fkMap[cname].RefColumns = append(fkMap[cname].RefColumns, refCol)
+		}
+		fkRows.Close()
+		for _, name := range fkOrder {
+			schema.ForeignKeys = append(schema.ForeignKeys, *fkMap[name])
+		}
+	}
+
+	// 获取 CHECK 约束
+	checkRows, err := a.db.QueryContext(ctx, `
+SELECT c.CONSTRAINT_NAME, c.SEARCH_CONDITION
+FROM ALL_CONSTRAINTS c
+WHERE c.OWNER = NVL(:1, USER) AND c.TABLE_NAME = UPPER(:2)
+AND c.CONSTRAINT_TYPE = 'C'
+AND c.GENERATED = 'USER NAME'
+ORDER BY c.CONSTRAINT_NAME
+`, schemaName, table)
+	if err == nil {
+		for checkRows.Next() {
+			var name string
+			var def sql.NullString
+			if err := checkRows.Scan(&name, &def); err == nil && def.Valid {
+				schema.Checks = append(schema.Checks, types.CheckMeta{
+					Name:       name,
+					Definition: def.String,
+				})
+			}
+		}
+		checkRows.Close()
+	}
+
 	return schema, nil
 }
 

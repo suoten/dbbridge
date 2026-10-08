@@ -94,12 +94,24 @@ func Run(port int, assets embed.FS, version string) {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           s.withSecurityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      0, // 迁移接口需长连接，逐处理器控制超时
+		IdleTimeout:       120 * time.Second,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("Web 服务退出: %v", err)
 	}
+}
+
+// withSecurityHeaders 添加安全响应头中间件
+func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ====================================================================
@@ -229,7 +241,10 @@ func (s *Server) handleMigrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 阻塞执行；日志打到服务端 stdout（服务器场景下可 journalctl 查看）
-	report, err := s.mig.Run(config,
+	// 迁移大表可能持续数小时，给足超时
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Hour)
+	defer cancel()
+	report, err := s.mig.RunWithContext(ctx, config,
 		func(info types.ProgressInfo) {
 			log.Printf("[进度] %s 表:%s %d/%d (%.1f%%)",
 				info.Phase, info.CurrentTable, info.ProcessedRows, info.TotalRows, info.Percent)
@@ -337,7 +352,20 @@ func (s *Server) handleConvertSQL(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.sql.ConvertSQL(req))
+	// SQL 转换是纯 CPU 操作，用 goroutine+select 做超时保护
+	type result struct {
+		r *service.ConvertSQLResult
+	}
+	done := make(chan result, 1)
+	go func() {
+		done <- result{s.sql.ConvertSQL(req)}
+	}()
+	select {
+	case res := <-done:
+		writeJSON(w, http.StatusOK, res.r)
+	case <-time.After(5 * time.Minute):
+		writeError(w, http.StatusGatewayTimeout, "SQL 转换超时（5 分钟）")
+	}
 }
 
 // handleLintSQL SQL 方言兼容性体检

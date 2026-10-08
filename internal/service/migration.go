@@ -26,12 +26,18 @@ func NewMigrationService() *MigrationService {
 // Run 执行迁移（阻塞直到完成或取消）。onProgress/onLog 回调由调用方提供。
 // 若已有任务在执行，返回报告并填充 Error 字段。
 func (m *MigrationService) Run(config types.MigrationConfig, onProgress orchestrator.ProgressCallback, onLog orchestrator.LogCallback) (*types.MigrationReport, error) {
+	return m.RunWithContext(context.Background(), config, onProgress, onLog)
+}
+
+// RunWithContext 执行迁移，使用传入的 context（支持超时/级联取消）。
+// 外部 context 超时或取消时，迁移会尽快收尾返回。
+func (m *MigrationService) RunWithContext(parentCtx context.Context, config types.MigrationConfig, onProgress orchestrator.ProgressCallback, onLog orchestrator.LogCallback) (*types.MigrationReport, error) {
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
 		return &types.MigrationReport{Error: "已有迁移任务在执行中，请等待完成或先取消"}, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parentCtx)
 	m.cancel = cancel
 	m.running = true
 	m.mu.Unlock()
