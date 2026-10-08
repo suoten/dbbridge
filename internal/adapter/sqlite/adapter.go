@@ -50,6 +50,11 @@ func (a *Adapter) Connect(ctx context.Context, config types.ConnectionConfig) er
 		return fmt.Errorf("sqlite: 打开数据库失败: %w", err)
 	}
 	db.SetMaxOpenConns(1) // SQLite 写入并发受限
+	// sql.Open 不实际建连，用 Ping 立刻暴露路径/权限错误
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return fmt.Errorf("sqlite: 连接失败: %w", err)
+	}
 	a.db = db
 	return nil
 }
@@ -441,7 +446,13 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 		// 类型映射
 		sb.WriteString(a.MapType(col))
 
-	if !col.Nullable && !col.Generated {
+	// SQLite AUTOINCREMENT 必须写成列级 "INTEGER PRIMARY KEY AUTOINCREMENT"，
+	// 不能写在表级 PRIMARY KEY(...) 里。单列自增主键在列定义中声明并标记跳过表级主键。
+	if col.AutoIncrement && col.IsPrimaryKey && !col.Generated {
+		sb.WriteString(" PRIMARY KEY AUTOINCREMENT")
+	}
+
+	if !col.Nullable && !col.Generated && !(col.AutoIncrement && col.IsPrimaryKey) {
 		sb.WriteString(" NOT NULL")
 	}
 
@@ -468,7 +479,17 @@ func (a *Adapter) GenerateCreateTableDDL(table types.TableSchema) (string, error
 			}
 		}
 	}
-	if len(pkCols) > 0 {
+	// 如果主键是单列且已在列级声明 PRIMARY KEY AUTOINCREMENT，跳过表级 PRIMARY KEY
+	hasInlineAutoIncPK := false
+	if len(pkCols) == 1 {
+		for _, col := range table.Columns {
+			if col.Name == pkCols[0] && col.AutoIncrement && col.IsPrimaryKey {
+				hasInlineAutoIncPK = true
+				break
+			}
+		}
+	}
+	if len(pkCols) > 0 && !hasInlineAutoIncPK {
 		sb.WriteString(",\n  PRIMARY KEY (")
 		for i, c := range pkCols {
 			if i > 0 {

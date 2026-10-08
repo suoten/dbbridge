@@ -421,14 +421,15 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		schema.ForeignKeys = append(schema.ForeignKeys, fk)
 	}
 
-	// 获取 CHECK 约束
+	// 获取 CHECK 约束（sys.tables.name 只存储裸表名，传入限定名时须用 table 变量）
 	checkRows, err := a.db.QueryContext(ctx, `
 		SELECT cc.name, cc.definition
 		FROM sys.check_constraints cc
 		JOIN sys.tables t ON t.object_id = cc.parent_object_id
-		WHERE t.name = @p1
+		JOIN sys.schemas s ON s.schema_id = t.schema_id
+		WHERE t.name = @p1 AND s.name = COALESCE(NULLIF(@p2, ''), 'dbo')
 		ORDER BY cc.name
-	`, tableName)
+	`, table, schemaName)
 	if err == nil {
 		for checkRows.Next() {
 			var name string
@@ -443,7 +444,7 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		checkRows.Close()
 	}
 
-	// 获取表级触发器
+	// 获取表级触发器（sys.tables.name 只存储裸表名，传入限定名时须用 table 变量）
 	trigRows, err := a.db.QueryContext(ctx, `
 		SELECT tr.name, tr.type_desc,
 		       OBJECTPROPERTY(tr.object_id, 'ExecIsAfterTrigger'),
@@ -454,9 +455,10 @@ func (a *Adapter) GetTableSchema(ctx context.Context, tableName string) (types.T
 		       OBJECT_DEFINITION(tr.object_id)
 		FROM sys.triggers tr
 		JOIN sys.tables t ON t.object_id = tr.parent_id
-		WHERE t.name = @p1
+		JOIN sys.schemas s ON s.schema_id = t.schema_id
+		WHERE t.name = @p1 AND s.name = COALESCE(NULLIF(@p2, ''), 'dbo')
 		ORDER BY tr.name
-	`, tableName)
+	`, table, schemaName)
 	if err == nil {
 		for trigRows.Next() {
 			var name, typeDesc string
@@ -1111,7 +1113,7 @@ func (a *Adapter) GenerateAddForeignKeyDDL(tableName string, fk types.ForeignKey
 		}
 		sb.WriteString(fmt.Sprintf("[%s]", escapeIdent(c)))
 	}
-	sb.WriteString(fmt.Sprintf(") REFERENCES [%s] (", escapeIdent(fk.RefTable)))
+	sb.WriteString(fmt.Sprintf(") REFERENCES %s (", qualifyTable(fk.RefTable)))
 	for i, c := range fk.RefColumns {
 		if i > 0 {
 			sb.WriteString(", ")

@@ -81,6 +81,8 @@ func isDb2Target(t types.DatabaseType) bool { return t == types.Db2 }
 
 func isMSSQLTarget(t types.DatabaseType) bool { return t == types.MSSQL }
 
+func isSQLiteTarget(t types.DatabaseType) bool { return t == types.SQLite }
+
 // buildRules 按目标方言构建规则集
 func buildRules(target types.DatabaseType) []rule {
 	var rules []rule
@@ -184,6 +186,12 @@ func buildRules(target types.DatabaseType) []rule {
 			`\bCONCAT_WS\s*\(|\bIFNULL\s*\(`,
 			"MySQL 系函数，PG/MSSQL 不支持 IFNULL/CONCAT_WS（PG 无 CONCAT_WS）",
 			"IFNULL 改为 COALESCE；CONCAT_WS 改用 || 或 CONCAT 拼接")
+	} else if !isSQLiteTarget(target) {
+		// SQLite 原生支持 IFNULL()，但不支持 CONCAT_WS
+		add("function", SeverityWarning,
+			`\bCONCAT_WS\s*\(`,
+			"CONCAT_WS 仅 MySQL 系和 SQLite 3.44+ 支持",
+			"PG 改用 || 拼接；MSSQL 改用 CONCAT + STRING_AGG")
 	}
 	if !isPGTarget(target) {
 		add("function", SeverityError,
@@ -202,6 +210,28 @@ func buildRules(target types.DatabaseType) []rule {
 			`\bNVL\s*\(`,
 			"NVL() 为 Oracle/达梦函数",
 			"统一改为 COALESCE()")
+	}
+
+	// ---- Oracle 特有构造 ----
+	if !isOracleTarget(target) && !isDamengTarget(target) {
+		add("function", SeverityError,
+			`\bSYSDATE\b`,
+			"SYSDATE 为 Oracle/达梦专有函数",
+			"MySQL 系改为 NOW()；PG 系改为 CURRENT_TIMESTAMP 或 NOW()；MSSQL 改为 GETDATE()")
+		add("function", SeverityWarning,
+			`\bFROM\s+DUAL\b`,
+			"DUAL 为 Oracle 专有伪表",
+			"MySQL 系支持 DUAL 但可省略；PG/MSSQL/SQLite 改为去掉 FROM DUAL")
+		add("pagination", SeverityError,
+			`\bROWNUM\b`,
+			"ROWNUM 为 Oracle 专有分页伪列",
+			"MySQL 系改为 LIMIT；PG 系改为 LIMIT/OFFSET 或 ROW_NUMBER()；MSSQL 改为 OFFSET ... FETCH NEXT")
+	}
+	if !isOracleTarget(target) {
+		add("function", SeverityWarning,
+			`\bNVL2\s*\(|\bDECODE\s*\(`,
+			"NVL2/DECODE 为 Oracle 专有函数",
+			"NVL2 改为 COALESCE；DECODE 改为 CASE WHEN ... THEN ... ELSE ... END")
 	}
 
 	// ---- UPSERT/MERGE ----

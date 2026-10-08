@@ -275,14 +275,18 @@ WHERE `+schemaFilter+` AND TABLE_NAME = ?
 		})
 	}
 
-	// 获取外键信息
+	// 获取外键信息（JOIN REFERENTIAL_CONSTRAINTS 以获取 ON DELETE/ON UPDATE 动作）
 	fkRows, err := a.db.QueryContext(ctx, `
-		SELECT CONSTRAINT_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-		FROM information_schema.KEY_COLUMN_USAGE
+		SELECT kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
+		       rc.DELETE_RULE, rc.UPDATE_RULE
+		FROM information_schema.KEY_COLUMN_USAGE kcu
+		LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+			ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+			AND rc.CONSTRAINT_SCHEMA = kcu.TABLE_SCHEMA
 		WHERE `+schemaFilter+`
-		AND TABLE_NAME = ?
-		AND REFERENCED_TABLE_NAME IS NOT NULL
-		ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+		AND kcu.TABLE_NAME = ?
+		AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+		ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION
 	`, append(schemaArgs, table)...)
 	if err != nil {
 		return schema, fmt.Errorf("%s: 查询外键信息失败: %w", a.brand(), err)
@@ -292,14 +296,22 @@ WHERE `+schemaFilter+` AND TABLE_NAME = ?
 	var fkOrder []string
 	for fkRows.Next() {
 		var constraintName, columnName, refTable, refColumn string
-		if err := fkRows.Scan(&constraintName, &columnName, &refTable, &refColumn); err != nil {
+		var deleteRule, updateRule sql.NullString
+		if err := fkRows.Scan(&constraintName, &columnName, &refTable, &refColumn, &deleteRule, &updateRule); err != nil {
 			return schema, fmt.Errorf("%s: 读取外键信息失败: %w", a.brand(), err)
 		}
 		if _, ok := fkMap[constraintName]; !ok {
-			fkMap[constraintName] = &types.ForeignKeyMeta{
+			fk := &types.ForeignKeyMeta{
 				Name:     constraintName,
 				RefTable: refTable,
 			}
+			if deleteRule.Valid {
+				fk.OnDelete = strings.ToLower(deleteRule.String)
+			}
+			if updateRule.Valid {
+				fk.OnUpdate = strings.ToLower(updateRule.String)
+			}
+			fkMap[constraintName] = fk
 			fkOrder = append(fkOrder, constraintName)
 		}
 		fkMap[constraintName].Columns = append(fkMap[constraintName].Columns, columnName)
