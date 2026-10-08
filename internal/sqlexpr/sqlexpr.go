@@ -39,10 +39,11 @@ func isMSSQL(t types.DatabaseType) bool { return t == types.MSSQL }
 
 // textState 全文扫描状态（跨语句/跨行维护）
 type textState struct {
-	inSingleQuote bool
-	inDoubleQuote bool
-	inLineComment bool
-	inBlock       bool
+	inSingleQuote  bool
+	inDoubleQuote  bool
+	inLineComment  bool
+	inBlock        bool
+	escapeNextChar bool // MySQL 反斜杠转义：单引号内 \ 后一字符跳过
 }
 
 // advance 处理 s[i] 处的字符并更新状态，返回 true 表示该字符属于代码区间。
@@ -50,6 +51,13 @@ type textState struct {
 // 高位为 1，不会命中任何 ASCII case，不会误判）。
 func (st *textState) advance(s string, i int) bool {
 	c := s[i]
+
+	// 转义字符的下一字符：无论在哪种引号内都原样跳过
+	if st.escapeNextChar {
+		st.escapeNextChar = false
+		return false
+	}
+
 	switch {
 	case st.inLineComment:
 		if c == '\n' {
@@ -64,6 +72,7 @@ func (st *textState) advance(s string, i int) bool {
 		return false
 	case st.inSingleQuote:
 		if c == '\\' && i+1 < len(s) { // MySQL 反斜杠转义
+			st.escapeNextChar = true
 			return false
 		}
 		if c == '\'' {
