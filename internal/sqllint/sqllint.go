@@ -156,6 +156,10 @@ func buildRules(target types.DatabaseType) []rule {
 			`\bISNULL\s*\(\s*[^)]+,`,
 			"ISNULL(expr, val) 两参函数仅 MSSQL 支持（PG 中 IS NULL 是语法不是函数）",
 			"统一改为 COALESCE(expr, val)，所有库都支持")
+		add("function", SeverityWarning,
+			`\bCONVERT\s*\(\s*\w+`,
+			"CONVERT(type, expr) 是 MSSQL 特有类型转换语法",
+			"统一改为 CAST(expr AS type)，所有主流数据库均支持")
 	}
 	if !isMySQLTarget(target) {
 		add("function", SeverityError,

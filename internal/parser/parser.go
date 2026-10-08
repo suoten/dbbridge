@@ -18,6 +18,7 @@ type SQLFileParser struct {
 	reader   *bufio.Reader
 	file     *os.File
 	lineNum  int
+	inBlockComment bool // 跨行块注释状态 /* ... */
 }
 
 // NewSQLFileParser 创建 SQL 文件解析器
@@ -45,6 +46,35 @@ func (p *SQLFileParser) Close() error {
 		return p.file.Close()
 	}
 	return nil
+}
+
+// stripInlineBlockComment 剥离行内块注释 /* ... */（单行内开始并结束的）。
+// 引号内的 /* 不视为注释起始。跨行块注释由调用方处理。
+func stripInlineBlockComment(line string, inSingleQuote, inDoubleQuote, inBacktick bool) string {
+	if inSingleQuote || inDoubleQuote || inBacktick {
+		return line
+	}
+	var result strings.Builder
+	i := 0
+	for i < len(line) {
+		if i+1 < len(line) && line[i] == '/' && line[i+1] == '*' {
+			// 检查是否在引号内
+			if !isInQuote(line[:i]) {
+				// 寻找闭合 */
+				end := strings.Index(line[i+2:], "*/")
+				if end >= 0 {
+					i = i + 2 + end + 2 // 跳过 */
+					continue
+				}
+				// 未闭合：截断到此，由调用方处理跨行
+				result.WriteString(line[:i])
+				return result.String()
+			}
+		}
+		result.WriteByte(line[i])
+		i++
+	}
+	return result.String()
 }
 
 // StatementType SQL 语句类型
@@ -91,15 +121,55 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 		p.lineNum++
 		trimmed := strings.TrimSpace(line)
 
+		// 块注释跨行处理：在块注释中时，寻找 */ 结束标记
+		if p.inBlockComment {
+			if idx := strings.Index(trimmed, "*/"); idx >= 0 {
+				// 块注释结束，截取 */ 之后的内容
+				p.inBlockComment = false
+				line = line[strings.Index(line, "*/")+2:]
+				trimmed = strings.TrimSpace(line)
+				if trimmed == "" {
+					return nil
+				}
+			} else {
+				return nil // 仍在块注释中，跳过整行
+			}
+		}
+
 		// 跳过空行和注释
 		if !hasContent {
-			if trimmed == "" || strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "/*") {
+			if trimmed == "" || strings.HasPrefix(trimmed, "--") || strings.HasPrefix(trimmed, "#") {
 				return nil
+			}
+			if strings.HasPrefix(trimmed, "/*") {
+				// 检查块注释是否在同一行结束
+				afterOpen := trimmed[2:]
+				if idx := strings.Index(afterOpen, "*/"); idx >= 0 {
+					// 同行结束，提取 */ 后的内容继续处理
+					rest := strings.TrimSpace(afterOpen[idx+2:])
+					if rest == "" {
+						return nil
+					}
+					line = rest
+					trimmed = rest
+				} else {
+					// 跨行块注释开始
+					p.inBlockComment = true
+					return nil
+				}
 			}
 		}
 
 		// 处理行内注释
 		line = stripLineComment(line, inSingleQuote, inDoubleQuote, inBacktick)
+
+		// 剥离行内块注释 /* ... */（单行内开始并结束的）
+		line = stripInlineBlockComment(line, inSingleQuote, inDoubleQuote, inBacktick)
+		// 如果行内块注释未闭合，标记跨行并截断
+		if idx := strings.Index(line, "/*"); idx >= 0 && !strings.Contains(line[idx+2:], "*/") {
+			p.inBlockComment = true
+			line = line[:idx]
+		}
 
 		if strings.TrimSpace(line) == "" && !hasContent {
 			return nil
@@ -161,6 +231,10 @@ func (p *SQLFileParser) NextStatement() (*Statement, error) {
 		// 文件在引号未闭合时结束，说明语句不完整，明确报错而非静默当作完整语句
 		if inSingleQuote || inDoubleQuote || inBacktick {
 			return nil, fmt.Errorf("parser: 第 %d 行开始的语句在文件末尾引号未闭合", startLine)
+		}
+		// 块注释未闭合
+		if p.inBlockComment {
+			return nil, fmt.Errorf("parser: 第 %d 行开始的块注释 /* 在文件末尾未闭合", startLine)
 		}
 		if hasContent {
 			stmt := strings.TrimSpace(sb.String())
@@ -246,6 +320,27 @@ func classifyStatement(sql string, dialect types.DatabaseType) StatementType {
 	}
 }
 
+func (p *SQLFileParser) finishStatement(inSingleQuote, inDoubleQuote, inBacktick bool, hasContent bool, sb *strings.Builder, startLine int) (*Statement, error) {
+	// 文件在引号未闭合时结束，说明语句不完整，明确报错而非静默当作完整语句
+	if inSingleQuote || inDoubleQuote || inBacktick {
+		return nil, fmt.Errorf("parser: 第 %d 行开始的语句在文件末尾引号未闭合", startLine)
+	}
+	// 块注释未闭合
+	if p.inBlockComment {
+		return nil, fmt.Errorf("parser: 第 %d 行开始的块注释 /* 在文件末尾未闭合 */", startLine)
+	}
+	if hasContent {
+		stmt := strings.TrimSpace(sb.String())
+		if stmt != "" {
+			return &Statement{
+				Type:    classifyStatement(stmt, p.dialect),
+				SQL:     stmt,
+				LineNum: startLine,
+			}, nil
+		}
+	}
+	return nil, io.EOF
+}
 // stripLineComment 去除行内注释（-- 和 #）
 func stripLineComment(line string, inSingleQuote, inDoubleQuote, inBacktick bool) string {
 	if inSingleQuote || inDoubleQuote || inBacktick {
