@@ -16,6 +16,7 @@ import {
   Copy,
   Check,
 } from '@lucide/vue'
+import * as api from '../api'
 
 interface ProgressInfo {
   phase: string
@@ -58,28 +59,25 @@ const strokeDashoffset = computed(() => {
 const MAX_LOGS = 500
 
 onMounted(async () => {
-  // @ts-ignore - Wails runtime
-  const runtime = window.runtime
-  if (runtime) {
-    unlistenProgress = runtime.EventsOn('migration:progress', (info: ProgressInfo) => {
-      progress.value = info
-      // 迁移结束（done 或中断后停止推送）时复位取消按钮状态
-      if (info.phase === 'done') {
-        cancelling.value = false
+  // 事件桥接：桌面模式走 Wails 事件推送，Web 模式内部轮询 /api/progress
+  unlistenProgress = api.onMigrationProgress((info: ProgressInfo) => {
+    progress.value = info
+    // 迁移结束（done 或中断后停止推送）时复位取消按钮状态
+    if (info.phase === 'done') {
+      cancelling.value = false
+    }
+  })
+  unlistenLog = api.onMigrationLog((entry: LogEntry) => {
+    logs.value.push(entry)
+    if (logs.value.length > MAX_LOGS) {
+      logs.value.splice(0, logs.value.length - MAX_LOGS)
+    }
+    nextTick(() => {
+      if (logContainer.value) {
+        logContainer.value.scrollTop = logContainer.value.scrollHeight
       }
     })
-    unlistenLog = runtime.EventsOn('migration:log', (entry: LogEntry) => {
-      logs.value.push(entry)
-      if (logs.value.length > MAX_LOGS) {
-        logs.value.splice(0, logs.value.length - MAX_LOGS)
-      }
-      nextTick(() => {
-        if (logContainer.value) {
-          logContainer.value.scrollTop = logContainer.value.scrollHeight
-        }
-      })
-    })
-  }
+  })
 })
 
 onUnmounted(() => {
@@ -134,8 +132,7 @@ async function cancelMigration() {
   if (cancelling.value) return
   cancelling.value = true
   try {
-    // @ts-ignore - Wails bindings
-    await window.go.main.App.CancelMigration()
+    await api.CancelMigration()
   } catch {
     // 取消失败也复位按钮，允许用户重试
     cancelling.value = false
@@ -207,7 +204,8 @@ function logColor(level: string): string {
             />
           </svg>
           <div class="circular-center">
-            <span class="circular-percent">{{ progress.percent.toFixed(0) }}<small>%</small></span>
+            <!-- 保留两位小数：99.7% 四舍五入成 100% 会让用户误以为迁移已完成 -->
+            <span class="circular-percent">{{ progress.percent.toFixed(2) }}<small>%</small></span>
             <span class="circular-phase">{{ getPhaseInfo(progress.phase).label }}</span>
           </div>
         </div>
