@@ -9,6 +9,7 @@ import {
   Info,
   AlertTriangle,
 } from '@lucide/vue'
+import * as api from '../api'
 
 const props = defineProps<{
   sourceConfig: ConnectionConfig
@@ -24,8 +25,7 @@ async function generate() {
   errorMsg.value = ''
   result.value = null
   try {
-    // @ts-ignore - Wails binding
-    result.value = await window.go.main.App.GenerateConnStrings(props.sourceConfig)
+    result.value = await api.GenerateConnStrings(props.sourceConfig)
   } catch (e: any) {
     errorMsg.value = e?.message || String(e)
   } finally {

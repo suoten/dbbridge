@@ -890,6 +890,7 @@ export namespace types {
 	    unsigned?: boolean;
 	    comment?: string;
 	    isPrimaryKey: boolean;
+	    generated?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ColumnMeta(source);
@@ -909,6 +910,7 @@ export namespace types {
 	        this.unsigned = source["unsigned"];
 	        this.comment = source["comment"];
 	        this.isPrimaryKey = source["isPrimaryKey"];
+	        this.generated = source["generated"];
 	    }
 	}
 	export class ConnectionConfig {

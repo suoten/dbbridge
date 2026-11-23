@@ -12,6 +12,7 @@ import {
   AlertTriangle,
 } from '@lucide/vue'
 import type { ConnectionConfig } from './ConnectionForm.vue'
+import * as api from '../api'
 
 const props = defineProps<{
   targetConfig: ConnectionConfig
@@ -41,8 +42,7 @@ async function loadBackups(keepMsg = false) {
   // keepMsg：回滚/删除后刷新列表时保留操作结果提示，否则成功提示会被清空
   if (!keepMsg) message.value = null
   try {
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.GetBackupTables(props.targetConfig)
+    const result = await api.GetBackupTables(props.targetConfig)
     if (result.success) {
       backups.value = (result.tables || []).map((t: any) => ({
         backupName: t.backupName,
@@ -50,7 +50,7 @@ async function loadBackups(keepMsg = false) {
         selected: false,
       }))
     } else {
-      message.value = { type: 'error', text: result.error }
+      message.value = { type: 'error', text: result.error || '加载备份列表失败' }
     }
   } catch (e: any) {
     message.value = { type: 'error', text: e?.message || String(e) }
@@ -75,8 +75,7 @@ async function restoreOne(backup: BackupItem) {
       connection: props.targetConfig,
       backupName: backup.backupName,
     }
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.RestoreTable(req)
+    const result = await api.RestoreTable(req)
     if (result.success) {
       message.value = {
         type: 'success',
@@ -103,8 +102,7 @@ async function restoreSelected() {
       connection: props.targetConfig,
       backupNames: selectedBackups.value.map(b => b.backupName),
     }
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.RestoreAllTables(req)
+    const result = await api.RestoreAllTables(req)
     const total = selectedBackups.value.length
     if (result.failedCount === 0) {
       message.value = {
@@ -136,8 +134,7 @@ async function deleteOne(backup: BackupItem) {
       connection: props.targetConfig,
       backupName: backup.backupName,
     }
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.DeleteBackup(req)
+    const result = await api.DeleteBackup(req)
     if (result.success) {
       message.value = {
         type: 'success',

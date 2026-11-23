@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   RefreshCw,
 } from '@lucide/vue'
+import * as api from '../api'
 
 const props = defineProps<{
   sourceConfig: ConnectionConfig
@@ -24,8 +25,7 @@ const report = ref<any>(null)
 
 onMounted(async () => {
   try {
-    // @ts-ignore - Wails binding
-    const list = await window.go.main.App.GetSupportedDatabases()
+    const list = await api.GetSupportedDatabases()
     if (Array.isArray(list)) {
       dialects.value = list.filter((d: string) => d !== props.sourceConfig.type)
     }
@@ -43,8 +43,7 @@ async function run() {
   errorMsg.value = ''
   report.value = null
   try {
-    // @ts-ignore - Wails binding
-    report.value = await window.go.main.App.GenerateMigrationGuide(
+    report.value = await api.GenerateMigrationGuide(
       props.sourceConfig,
       targetDialect.value,
       []

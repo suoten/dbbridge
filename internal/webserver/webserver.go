@@ -14,13 +14,25 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"dbbridge/internal/history"
 	"dbbridge/internal/service"
 	"dbbridge/internal/sqllint"
 	types "dbbridge/pkg"
 )
+
+// maxProgLogs 进度日志环形缓冲上限（与桌面端 ProgressPanel MAX_LOGS 一致）
+const maxProgLogs = 500
+
+// progLog 带序号的进度日志（序号用于增量拉取）
+type progLog struct {
+	seq   int64
+	entry types.LogEntry
+}
 
 // Server headless Web 服务
 type Server struct {
@@ -29,16 +41,32 @@ type Server struct {
 	backup  *service.BackupService
 	sql     *service.SQLService
 	version string
+	store   *history.Store
+
+	// 迁移进度快照中心：Web 模式没有 Wails 事件推送，
+	// 前端通过轮询 /api/progress 获取进度与日志（同进程仅一个迁移任务）
+	progMu      sync.Mutex
+	progInfo    types.ProgressInfo
+	progHasInfo bool
+	progLogs    []progLog
+	progNextSeq int64
 }
 
 // Run 启动 Web 服务（阻塞）
 func Run(port int, assets embed.FS, version string) {
+	// 迁移历史存储（与桌面模式同一套 SQLite 存储，位于用户配置目录）
+	store, err := history.NewStore()
+	if err != nil {
+		log.Printf("初始化迁移历史存储失败（历史功能不可用）: %v", err)
+	}
+
 	s := &Server{
 		conn:    service.NewConnectionService(),
 		mig:     service.NewMigrationService(),
 		backup:  service.NewBackupService(),
 		sql:     service.NewSQLService(),
 		version: version,
+		store:   store,
 	}
 
 	mux := http.NewServeMux()
@@ -53,6 +81,9 @@ func Run(port int, assets embed.FS, version string) {
 	mux.HandleFunc("/api/migrate", s.handleMigrate)
 	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/progress", s.handleProgress)
+	mux.HandleFunc("/api/history", s.handleHistory)
+	mux.HandleFunc("/api/history/delete", s.handleHistoryDelete)
 	mux.HandleFunc("/api/backups", s.handleBackups)
 	mux.HandleFunc("/api/backups/restore", s.handleRestoreBackup)
 	mux.HandleFunc("/api/backups/delete", s.handleDeleteBackup)
@@ -86,7 +117,9 @@ func Run(port int, assets embed.FS, version string) {
 	log.Printf("API: GET /api/health, GET /api/version, GET /api/databases,")
 	log.Printf("  POST /api/test-connection {ConnectionConfig}, POST /api/tables {ConnectionConfig},")
 	log.Printf("  POST /api/schema {config, table}, POST /api/migrate {MigrationConfig}（阻塞，返回报告）,")
-	log.Printf("  POST /api/cancel, GET /api/status, GET /api/backups {config},")
+	log.Printf("  POST /api/cancel, GET /api/status, GET /api/progress?sinceSeq=N,")
+	log.Printf("  GET /api/history, POST /api/history/delete {id},")
+	log.Printf("  POST /api/backups {config},")
 	log.Printf("  POST /api/backups/restore {config, backupName|backupNames}, POST /api/backups/delete {config, backupName},")
 	log.Printf("  POST /api/convert-sql {sourceDialect, targetDialect, sql}, POST /api/lint-sql {sourceDialect, targetDialect, sql},")
 	log.Printf("  POST /api/validate {source, target, tables?, sampleSize?},")
@@ -125,9 +158,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeError 输出错误响应
+// writeError 输出错误响应（success 必须是布尔，前端按真值判断成败）
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"success": "false", "error": msg})
+	writeJSON(w, status, map[string]any{"success": false, "error": msg})
 }
 
 // maxBodySize 单次请求体上限（10 MB，SQL 脚本转换可能较大）
@@ -240,19 +273,31 @@ func (s *Server) handleMigrate(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &config) {
 		return
 	}
-	// 阻塞执行；日志打到服务端 stdout（服务器场景下可 journalctl 查看）
+	// 重置进度快照，避免残留上一次任务的数据
+	s.resetProgress()
+	// 阻塞执行；日志打到服务端 stdout（服务器场景下可 journalctl 查看），
+	// 同时写入进度快照中心供 /api/progress 轮询（Web 模式没有 Wails 事件推送）
 	// 迁移大表可能持续数小时，给足超时
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Hour)
 	defer cancel()
 	report, err := s.mig.RunWithContext(ctx, config,
 		func(info types.ProgressInfo) {
+			s.recordProgress(info)
 			log.Printf("[进度] %s 表:%s %d/%d (%.1f%%)",
 				info.Phase, info.CurrentTable, info.ProcessedRows, info.TotalRows, info.Percent)
 		},
 		func(entry types.LogEntry) {
+			s.recordLog(entry)
 			log.Printf("[%s] %s %s", entry.Level, entry.Table, entry.Message)
 		},
 	)
+	// 迁移历史落库（与桌面模式共用 BuildRecord）
+	if s.store != nil && report != nil {
+		record := history.BuildRecord(config.Source, config.Target, report, err)
+		if saveErr := s.store.SaveRecord(record); saveErr != nil {
+			log.Printf("保存迁移历史失败: %v", saveErr)
+		}
+	}
 	if err != nil && report == nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -272,6 +317,116 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"running": s.mig.IsRunning()})
+}
+
+// handleProgress 迁移进度快照（Web 模式轮询替代 Wails migration:progress/migration:log 事件）
+// GET /api/progress?sinceSeq=N → {running, hasProgress, progress, logs, lastSeq}，
+// logs 仅返回序号大于 sinceSeq 的增量条目
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	sinceSeq, _ := strconv.ParseInt(r.URL.Query().Get("sinceSeq"), 10, 64)
+	running, hasInfo, info, logs, lastSeq := s.progressSnapshot(sinceSeq)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running":     running,
+		"hasProgress": hasInfo,
+		"progress":    info,
+		"logs":        logs,
+		"lastSeq":     lastSeq,
+	})
+}
+
+// handleHistory 迁移历史列表
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusOK, []history.MigrationRecord{})
+		return
+	}
+	records, err := s.store.GetRecords()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if records == nil {
+		records = []history.MigrationRecord{}
+	}
+	writeJSON(w, http.StatusOK, records)
+}
+
+// handleHistoryDelete 删除单条迁移历史
+func (s *Server) handleHistoryDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if s.store == nil {
+		writeError(w, http.StatusInternalServerError, "迁移历史存储不可用")
+		return
+	}
+	if err := s.store.DeleteRecord(req.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// ====================================================================
+// 迁移进度快照中心
+// ====================================================================
+
+// resetProgress 清空进度快照（新任务开始前调用）
+func (s *Server) resetProgress() {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	s.progInfo = types.ProgressInfo{}
+	s.progHasInfo = false
+	s.progLogs = nil
+	s.progNextSeq = 0
+}
+
+// recordProgress 记录最新进度快照
+func (s *Server) recordProgress(info types.ProgressInfo) {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	s.progInfo = info
+	s.progHasInfo = true
+}
+
+// recordLog 追加进度日志（环形缓冲，超上限丢弃最旧条目）
+func (s *Server) recordLog(entry types.LogEntry) {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	s.progNextSeq++
+	s.progLogs = append(s.progLogs, progLog{seq: s.progNextSeq, entry: entry})
+	if len(s.progLogs) > maxProgLogs {
+		s.progLogs = s.progLogs[len(s.progLogs)-maxProgLogs:]
+	}
+}
+
+// progressSnapshot 返回进度快照与 sinceSeq 之后的增量日志
+func (s *Server) progressSnapshot(sinceSeq int64) (running bool, hasInfo bool, info types.ProgressInfo, logs []types.LogEntry, lastSeq int64) {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	running = s.mig.IsRunning()
+	hasInfo = s.progHasInfo
+	info = s.progInfo
+	lastSeq = s.progNextSeq
+	logs = []types.LogEntry{}
+	for _, pl := range s.progLogs {
+		if pl.seq > sinceSeq {
+			logs = append(logs, pl.entry)
+		}
+	}
+	return
 }
 
 func (s *Server) handleBackups(w http.ResponseWriter, r *http.Request) {

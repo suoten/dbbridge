@@ -11,13 +11,13 @@ import {
   Info,
   Search,
 } from '@lucide/vue'
+import * as api from '../api'
 
 // 支持的方言列表（与后端 GetSupportedDatabases 一致）
 const dialects = ref<string[]>([])
 onMounted(async () => {
   try {
-    // @ts-ignore - Wails binding
-    const list = await window.go.main.App.GetSupportedDatabases()
+    const list = await api.GetSupportedDatabases()
     if (Array.isArray(list)) dialects.value = list
   } catch {
     dialects.value = ['mysql', 'mariadb', 'tidb', 'oceanbase', 'dameng', 'postgres', 'opengauss', 'kingbase', 'cockroachdb', 'sqlite', 'mssql']
@@ -46,8 +46,7 @@ async function runConvert() {
   convertResult.value = null
   lintResult.value = null
   try {
-    // @ts-ignore - Wails binding
-    convertResult.value = await window.go.main.App.ConvertSQL({
+    convertResult.value = await api.ConvertSQL({
       sourceDialect: sourceDialect.value,
       targetDialect: targetDialect.value,
       sql: sqlText.value,
@@ -65,8 +64,7 @@ async function runLint() {
   convertResult.value = null
   lintResult.value = null
   try {
-    // @ts-ignore - Wails binding
-    lintResult.value = await window.go.main.App.LintSQL({
+    lintResult.value = await api.LintSQL({
       sourceDialect: sourceDialect.value,
       targetDialect: targetDialect.value,
       sql: sqlText.value,

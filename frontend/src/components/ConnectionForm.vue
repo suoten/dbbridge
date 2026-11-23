@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   HardDrive,
 } from '@lucide/vue'
+import * as api from '../api'
 
 export interface ConnectionConfig {
   type: string
@@ -142,8 +143,7 @@ async function handleTest() {
   testing.value = true
   testResult.value = null
   try {
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.TestConnection(props.modelValue)
+    const result = await api.TestConnection(props.modelValue)
     testResult.value = result
     if (result.success) {
       emit('test')

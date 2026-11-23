@@ -15,6 +15,7 @@ import {
   Archive,
 } from '@lucide/vue'
 import type { ConnectionConfig } from './ConnectionForm.vue'
+import * as api from '../api'
 
 const emit = defineEmits<{
   'select-target': [config: ConnectionConfig]
@@ -56,8 +57,7 @@ function getStatus(s: string) {
 async function loadHistory() {
   loading.value = true
   try {
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.GetMigrationHistory()
+    const result = await api.GetMigrationHistory()
     records.value = result || []
   } catch (e) {
     console.error('Failed to load history:', e)
@@ -68,8 +68,7 @@ async function loadHistory() {
 
 async function deleteRecord(id: number) {
   try {
-    // @ts-ignore - Wails binding
-    await window.go.main.App.DeleteMigrationHistory(id)
+    await api.DeleteMigrationHistory(id)
     records.value = records.value.filter(r => r.id !== id)
   } catch (e) {
     console.error('Failed to delete record:', e)

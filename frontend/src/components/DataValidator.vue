@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { ref, computed } from 'vue'
 import type { ConnectionConfig } from './ConnectionForm.vue'
+import * as api from '../api'
 import {
   ClipboardCheck,
   Database,
@@ -46,8 +47,7 @@ async function loadTables() {
   loadingTables.value = true
   tablesError.value = ''
   try {
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.GetTables(props.sourceConfig)
+    const result = await api.GetTables(props.sourceConfig)
     if (result.success) {
       tables.value = (result.tables || []).map((t: any) => ({ name: t.name, selected: true }))
     } else {
@@ -77,8 +77,7 @@ async function runValidate() {
   compatReport.value = null
   if (mode.value === 'compat') {
     try {
-      // @ts-ignore - Wails binding
-      compatReport.value = await window.go.main.App.CheckCompatibility({
+      compatReport.value = await api.CheckCompatibility({
         source: props.sourceConfig,
         target: props.targetConfig,
         tables: selectedTables.value,
@@ -91,8 +90,7 @@ async function runValidate() {
     return
   }
   try {
-    // @ts-ignore - Wails binding
-    report.value = await window.go.main.App.ValidateData({
+    report.value = await api.ValidateData({
       source: props.sourceConfig,
       target: props.targetConfig,
       tables: selectedTables.value,
