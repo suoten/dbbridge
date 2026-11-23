@@ -465,6 +465,12 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 		}
 	}
 
+	// 1.5 迁移插件/扩展（如 PostGIS）：必须先于建表执行，
+	// 否则源表含 geometry 等扩展类型列时，目标库建表 DDL 直接失败。
+	if o.config.MigratePlugins {
+		o.migratePlugins(runCtx, report)
+	}
+
 	// 2. 获取表列表
 	var tables []string
 	if len(o.config.Tables) > 0 {
@@ -488,7 +494,10 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 	// 并行乱序删除会被子表外键阻塞（PG 2BP01 / MySQL 3730 / MSSQL 3726），
 	// 真实库集成测试实测：orders.user_id → users.id 时先删 users 必败。
 	// 预删后 migrateTable 的同名检测自然走建表分支。
-	if o.config.DropIfExists && !o.config.DataOnly && len(tables) > 1 {
+	// 注意：BackupBefore 时不能预删——单表分支的优先级是"备份优先于删除"
+	// （备份把旧表改名让位，数据随 _bak_* 保留）；预删会把旧数据直接丢掉，
+	// 使备份选项静默失效。仅纯先删后建模式预删。
+	if o.config.DropIfExists && !o.config.BackupBefore && !o.config.DataOnly && len(tables) > 1 {
 		order := tables
 		if layers := o.dependencyLayers(runCtx, tables); len(layers) > 0 {
 			order = nil
@@ -511,6 +520,9 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 			if err := o.dropTargetTable(runCtx, target); err != nil {
 				return report, fmt.Errorf("预删除目标表 %s 失败: %w", target, err)
 			}
+			// 分区父表：DROP 已级联清掉 attached 分区，这里兜底清理旧版本
+			// 平铺迁移遗留的游离子表，否则新层级建分区因重名失败
+			o.dropStalePartitionChildren(runCtx, name)
 			o.log("INFO", name, fmt.Sprintf("已预删除目标表: %s", target))
 		}
 	}
@@ -793,12 +805,16 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 					CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 				})
 				o.mu.Unlock()
+				// 分区父表：BackupTable 已随层级改名 attached 分区；
+				// 旧版本平铺迁移遗留的游离同名子表在此兜底改名让位
+				o.backupStalePartitionChildren(ctx, tableName)
 			} else if o.config.DropIfExists {
 				// 直接删除模式（错误显式传播）
 				o.log("INFO", tableName, "目标库存在同名表，正在删除...")
 				if err := o.dropTargetTable(ctx, targetName); err != nil {
 					return 0, fmt.Errorf("删除目标同名表失败: %w", err)
 				}
+				o.dropStalePartitionChildren(ctx, tableName)
 			}
 			// 如果既不备份也不删除，且表已存在，建表会失败，让错误自然抛出
 		}
@@ -850,6 +866,9 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 			}
 		}
 		o.log("INFO", tableName, "表结构创建完成")
+		if schema.PartitionBy != "" {
+			o.log("INFO", tableName, fmt.Sprintf("分区表 (%s)，已创建 %d 个分区", schema.PartitionBy, len(schema.Partitions)))
+		}
 	}
 
 	// 迁移数据
@@ -1040,6 +1059,61 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 // sourceName 用于查找备份记录（BackupInfo.OriginalTable 存源表名），
 // targetName（目标限定表名）用于目标库上的恢复操作。
 // 注意：RestoreFromBackup 是网络 I/O，必须在锁外执行，否则会阻塞所有进度上报。
+// backupStalePartitionChildren 分区父表备份后的兜底：旧版本把分区当普通表
+// 平铺迁移，目标库遗留与源分区子表同名的游离独立表（不挂在任何层级下），
+// BackupTable 的层级改名覆盖不到它们，需逐个改名让位，否则新层级建
+// CREATE TABLE ... PARTITION OF 必因名字占用失败。失败仅告警不阻断。
+func (o *Orchestrator) backupStalePartitionChildren(ctx context.Context, sourceTable string) {
+	hier, ok := o.sourceAdapter.(types.TableHierarchyAware)
+	if !ok {
+		return
+	}
+	children, err := hier.PartitionChildren(ctx, sourceTable)
+	if err != nil || len(children) == 0 {
+		return
+	}
+	for _, m := range children {
+		target := o.resolveTargetName(m.Name)
+		exists, err := o.targetAdapter.TableExists(ctx, target)
+		if err != nil || !exists {
+			continue
+		}
+		bak, err := o.targetAdapter.BackupTable(ctx, target)
+		if err != nil {
+			o.log("WARN", sourceTable, fmt.Sprintf("备份游离子表 %s 失败: %v", target, err))
+			continue
+		}
+		o.log("INFO", sourceTable, fmt.Sprintf("已备份游离子表 %s → %s", target, bak))
+	}
+}
+
+// dropStalePartitionChildren 分区父表删除后的兜底：清理目标库中与源分区子表
+// 同名的游离残留表（attached 分区已随父表 DROP 级联删除，这里只兜底游离残留）。
+// 失败仅告警不阻断——残留存在时后续建分区会给出明确的失败原因。
+func (o *Orchestrator) dropStalePartitionChildren(ctx context.Context, sourceTable string) {
+	hier, ok := o.sourceAdapter.(types.TableHierarchyAware)
+	if !ok {
+		return
+	}
+	children, err := hier.PartitionChildren(ctx, sourceTable)
+	if err != nil || len(children) == 0 {
+		return
+	}
+	for _, m := range children {
+		target := o.resolveTargetName(m.Name)
+		exists, err := o.targetAdapter.TableExists(ctx, target)
+		if err != nil || !exists {
+			continue
+		}
+		dropDDL, _ := o.targetAdapter.GenerateDropTableDDL(target)
+		if err := o.targetAdapter.ExecContext(ctx, dropDDL); err != nil {
+			o.log("WARN", sourceTable, fmt.Sprintf("清理游离子表 %s 失败（可能存在依赖，请手动处理）: %v", target, err))
+			continue
+		}
+		o.log("INFO", sourceTable, fmt.Sprintf("已清理游离子表 %s", target))
+	}
+}
+
 func (o *Orchestrator) tryRollback(ctx context.Context, sourceName, targetName string) bool {
 	o.mu.Lock()
 	var backup *types.BackupInfo
@@ -1190,6 +1264,62 @@ func truncate(s string, n int) string {
 		used += size
 	}
 	return sb.String() + "..."
+}
+
+// migratePlugins 迁移插件/扩展（如 PostGIS、pg_trgm）：从源库读取已安装插件，
+// 在目标库逐一创建。仅 PG 系数据库支持（插件是 PG 生态概念），
+// 源或目标不支持时告警跳过，不影响迁移主流程。
+func (o *Orchestrator) migratePlugins(ctx context.Context, report *types.MigrationReport) {
+	o.log("INFO", "", "开始迁移插件/扩展...")
+
+	src, ok := o.sourceAdapter.(types.PluginAware)
+	if !ok {
+		o.log("INFO", "", fmt.Sprintf("源数据库 %s 无插件/扩展概念，跳过插件迁移", o.config.Source.Type))
+		return
+	}
+	tgt, ok := o.targetAdapter.(types.PluginAware)
+	if !ok {
+		o.log("WARN", "", fmt.Sprintf("目标数据库 %s 不支持插件创建，跳过插件迁移", o.config.Target.Type))
+		return
+	}
+
+	plugins, err := src.ListPlugins(ctx)
+	if err != nil {
+		o.log("WARN", "", fmt.Sprintf("读取源库插件列表失败: %v", err))
+		return
+	}
+	if len(plugins) == 0 {
+		o.log("INFO", "", "源库无已安装插件")
+		return
+	}
+
+	o.log("INFO", "", fmt.Sprintf("发现 %d 个插件，开始在目标库创建...", len(plugins)))
+	for _, plugin := range plugins {
+		if ctx.Err() != nil {
+			return
+		}
+
+		ddl, err := tgt.CreatePluginDDL(plugin)
+		if err != nil {
+			msg := fmt.Sprintf("插件 %s: 生成 DDL 失败 - %v", plugin.Name, err)
+			o.log("ERROR", "", msg)
+			report.PluginErrors = append(report.PluginErrors, msg)
+			continue
+		}
+
+		// CREATE EXTENSION 需整体执行，不能按分号拆分
+		if err := o.execDDL(ctx, ddl); err != nil {
+			msg := fmt.Sprintf("插件 %s: 创建失败 - %v (SQL: %s)", plugin.Name, err, truncate(ddl, 120))
+			o.log("ERROR", "", msg)
+			report.PluginErrors = append(report.PluginErrors, msg)
+			continue
+		}
+
+		report.PluginsMigrated++
+		o.log("INFO", "", fmt.Sprintf("插件 %s 创建成功", plugin.Name))
+	}
+
+	o.log("INFO", "", fmt.Sprintf("插件迁移完成: 成功 %d, 失败 %d", report.PluginsMigrated, len(report.PluginErrors)))
 }
 
 // migrateTriggers 迁移触发器：从源库读取触发器定义，转换为目标方言，在目标库执行。

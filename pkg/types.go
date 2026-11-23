@@ -1,6 +1,9 @@
 package types
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // DatabaseType 数据库类型枚举
 type DatabaseType string
@@ -81,6 +84,9 @@ type IndexMeta struct {
 	IsUnique  bool     `json:"isUnique"`
 	IsPrimary bool     `json:"isPrimary"`      // 主键索引
 	Type      string   `json:"type,omitempty"` // BTREE, HASH 等
+	// Definition 完整索引定义（PG 系 pg_get_indexdef，含 USING 方法/表达式列/
+	// 操作符类/部分索引谓词）。提供时按定义重建以保真；空则按 Columns 重建 btree。
+	Definition string `json:"definition,omitempty"`
 }
 
 // ForeignKeyMeta 外键的元数据
@@ -105,6 +111,10 @@ type TableSchema struct {
 	Collation   string           `json:"collation,omitempty"` // MySQL 专用
 	Checks      []CheckMeta      `json:"checks,omitempty"`    // CHECK 约束
 	Triggers    []TriggerMeta    `json:"triggers,omitempty"`  // 触发器
+	// PartitionBy 分区键定义（PG 声明式分区，如 "RANGE (year)"；空=非分区表）
+	PartitionBy string `json:"partitionBy,omitempty"`
+	// Partitions 分区后代列表（深度升序、父先于子；仅分区父表非空）
+	Partitions []PartitionMeta `json:"partitions,omitempty"`
 }
 
 // CheckMeta CHECK 约束元数据
@@ -161,6 +171,39 @@ type RunSuffixAware interface {
 	SetRunSuffix(suffix string)
 }
 
+// PluginMeta 数据库插件/扩展元数据（如 PostGIS、pg_trgm）
+type PluginMeta struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
+// PartitionMeta PG 分区子表元数据（声明式分区的后代）
+type PartitionMeta struct {
+	Name          string `json:"name"`                    // 分区表名（裸名，不带 schema）
+	Parent        string `json:"parent,omitempty"`        // 直接父表名（裸名；根表或上级分区）
+	Bound         string `json:"bound,omitempty"`         // pg_get_expr(relpartbound)，如 FOR VALUES FROM ('2018') TO ('2019')
+	IsPartitioned bool   `json:"isPartitioned,omitempty"` // 该分区自身再分区（多级分区）
+	PartitionBy   string `json:"partitionBy,omitempty"`   // 该分区的 PARTITION BY 定义（IsPartitioned 时非空）
+}
+
+// PluginAware 支持数据库插件（扩展）读取与创建的适配器。
+// 仅 PG 系数据库实现（扩展是 PG 生态概念）；非 PG 系适配器不实现，
+// orchestrator 按能力断言降级跳过。
+type PluginAware interface {
+	// ListPlugins 列出库中已安装的插件（不含过程语言等系统内置）
+	ListPlugins(ctx context.Context) ([]PluginMeta, error)
+	// CreatePluginDDL 生成在目标库创建该插件的 DDL（要求幂等）
+	CreatePluginDDL(plugin PluginMeta) (string, error)
+}
+
+// TableHierarchyAware 支持表继承/分区层级查询的适配器（PG 系声明式分区）。
+// orchestrator 用它做存量游离子表清理与层级感知的备份/恢复。
+type TableHierarchyAware interface {
+	// PartitionChildren 返回表的分区后代（含多级，按深度升序、父先于子）。
+	// 非分区表或无后代时返回空切片而非错误。
+	PartitionChildren(ctx context.Context, tableName string) ([]PartitionMeta, error)
+}
+
 // SplitQualified 将可能带 Schema 限定的表名拆分为 (schema, table)。
 // "a.b" -> ("a", "b")；"b" -> ("", "b")。
 // 约定：orchestrator 仅在配置了 Schema 映射时才生成限定名；
@@ -189,6 +232,7 @@ type MigrationConfig struct {
 	AutoRollback    bool             `json:"autoRollback"`            // 迁移失败时自动回滚到备份
 	MigrateTriggers bool             `json:"migrateTriggers"`         // 迁移触发器
 	MigrateRoutines bool             `json:"migrateRoutines"`         // 迁移存储过程/函数
+	MigratePlugins  bool             `json:"migratePlugins"`          // 迁移插件/扩展（如 PostGIS，仅 PG 系生效；先于建表执行）
 
 	// Schema 映射与表空间（不配置时行为与既往版本完全一致）
 	SchemaDefault string            `json:"schemaDefault,omitempty"` // 全局默认目标 Schema（空=目标连接默认库）
@@ -245,6 +289,8 @@ type MigrationReport struct {
 	RoutinesMigrated int           `json:"routinesMigrated,omitempty"` // 迁移的存储过程/函数数
 	TriggerErrors    []string      `json:"triggerErrors,omitempty"`    // 触发器迁移失败列表
 	RoutineErrors    []string      `json:"routineErrors,omitempty"`    // 存储过程迁移失败列表
+	PluginsMigrated  int           `json:"pluginsMigrated,omitempty"`  // 迁移的插件/扩展数
+	PluginErrors     []string      `json:"pluginErrors,omitempty"`     // 插件迁移失败列表
 	FKErrors         []string      `json:"fkErrors,omitempty"`         // 外键补建失败列表（不影响数据，需人工核对）
 }
 

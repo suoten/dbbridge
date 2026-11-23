@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +97,7 @@ type StartMigrationRequest struct {
 	AutoRollback    bool              `json:"autoRollback"`
 	MigrateTriggers bool              `json:"migrateTriggers"`
 	MigrateRoutines bool              `json:"migrateRoutines"`
+	MigratePlugins  bool              `json:"migratePlugins"` // 迁移插件/扩展（如 PostGIS，仅 PG 系生效）
 	// Schema 映射与表空间（不传/留空时行为与既往版本完全一致）
 	SchemaDefault string            `json:"schemaDefault,omitempty"`
 	SchemaTables  map[string]string `json:"schemaTables,omitempty"`
@@ -224,6 +224,7 @@ func (a *App) StartMigration(req StartMigrationRequest) *types.MigrationReport {
 		AutoRollback:    req.AutoRollback,
 		MigrateTriggers: req.MigrateTriggers,
 		MigrateRoutines: req.MigrateRoutines,
+		MigratePlugins:  req.MigratePlugins,
 		SchemaDefault:   req.SchemaDefault,
 		SchemaTables:    req.SchemaTables,
 		Tablespace:      req.Tablespace,
@@ -291,71 +292,8 @@ func (a *App) saveHistory(req StartMigrationRequest, report *types.MigrationRepo
 		return
 	}
 
-	status := "success"
-	// 迁移被拒绝/中止时 orchestrator 返回 (report, err)，report.Error 已带原因；
-	// 也有 err==nil 但 report.Error 非空的路径（如取消），都要落为失败，不能写假 success
-	if report.Error != "" {
-		if report.TablesSuccess > 0 {
-			status = "partial"
-		} else {
-			status = "failed"
-		}
-	} else if migErr != nil {
-		if report.TablesSuccess > 0 {
-			status = "partial"
-		} else {
-			status = "failed"
-		}
-	}
-
-	// 源库地址
-	sourceHost := req.Source.Host
-	if req.Source.Type == "sqlite" {
-		sourceHost = "(file)"
-	}
-
-	// 目标库地址
-	targetHost := req.Target.Host
-	if req.Target.Type == "sqlite" {
-		targetHost = "(file)"
-	}
-
-	// 序列化表详情和备份
-	var tableDetailsJSON, backupsJSON json.RawMessage
-	if len(report.TableDetails) > 0 {
-		if data, err := json.Marshal(report.TableDetails); err == nil {
-			tableDetailsJSON = data
-		} else {
-			wailsRuntime.LogErrorf(a.ctx, "序列化表详情失败: %v", err)
-		}
-	}
-	if len(report.Backups) > 0 {
-		if data, err := json.Marshal(report.Backups); err == nil {
-			backupsJSON = data
-		} else {
-			wailsRuntime.LogErrorf(a.ctx, "序列化备份信息失败: %v", err)
-		}
-	}
-
-	record := history.MigrationRecord{
-		StartTime:     report.StartTime,
-		EndTime:       report.EndTime,
-		Duration:      report.Duration,
-		SourceType:    req.Source.Type,
-		SourceHost:    sourceHost,
-		SourceDB:      req.Source.Database,
-		TargetType:    req.Target.Type,
-		TargetHost:    targetHost,
-		TargetDB:      req.Target.Database,
-		TablesTotal:   report.TablesTotal,
-		TablesSuccess: report.TablesSuccess,
-		TablesFailed:  report.TablesFailed,
-		TotalRows:     report.TotalRows,
-		Status:        status,
-		TableDetails:  tableDetailsJSON,
-		Backups:       backupsJSON,
-	}
-
+	// 记录构建逻辑与 Web 模式共用（internal/history.BuildRecord）
+	record := history.BuildRecord(toConfig(req.Source), toConfig(req.Target), report, migErr)
 	if err := a.store.SaveRecord(record); err != nil {
 		wailsRuntime.LogErrorf(a.ctx, "保存迁移历史失败: %v", err)
 	}

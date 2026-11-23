@@ -17,7 +17,9 @@ import {
   FileText,
   FolderOpen,
   Copy,
+  Puzzle,
 } from '@lucide/vue'
+import * as api from '../api'
 
 interface TableReport {
   tableName: string
@@ -52,6 +54,8 @@ interface MigrationReport {
   routinesMigrated?: number
   triggerErrors?: string[]
   routineErrors?: string[]
+  pluginsMigrated?: number
+  pluginErrors?: string[]
   logFile?: string
 }
 
@@ -66,8 +70,11 @@ function formatNumber(n: number): string {
 // 在文件管理器中打开日志文件所在目录（调用后端 OpenInFolder）
 async function openLogFile(path: string) {
   try {
-    // @ts-ignore - Wails binding
-    await window.go.main.App.OpenInFolder(path)
+    const result = await api.OpenInFolder(path)
+    if (result && result.success === false && result.error) {
+      // Web 部署模式无法在服务器上打开文件夹，明确提示而不是无声失败
+      alert(result.error)
+    }
   } catch {
     // 打开失败时用户仍可手动复制路径
   }
@@ -245,6 +252,32 @@ function getStatus(s: string) {
       </div>
       <div class="error-list" v-if="report.routineErrors && report.routineErrors.length > 0">
         <div class="error-item" v-for="(err, i) in report.routineErrors" :key="'rout-' + i">
+          <AlertCircle :size="12" />
+          <span>{{ err }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== 插件（扩展）迁移结果 ====== -->
+    <div class="details-section" v-if="report.pluginsMigrated || (report.pluginErrors && report.pluginErrors.length > 0)">
+      <div class="details-header">
+        <Puzzle :size="16" />
+        <span>插件（扩展）迁移</span>
+      </div>
+
+      <div class="routine-summary">
+        <div class="routine-stat" v-if="report.pluginsMigrated !== undefined">
+          <Puzzle :size="14" />
+          <span class="routine-stat-label">插件成功:</span>
+          <span class="routine-stat-value success">{{ report.pluginsMigrated }}</span>
+          <span class="routine-stat-fail" v-if="report.pluginErrors && report.pluginErrors.length > 0">
+            失败: {{ report.pluginErrors.length }}
+          </span>
+        </div>
+      </div>
+
+      <div class="error-list" v-if="report.pluginErrors && report.pluginErrors.length > 0">
+        <div class="error-item" v-for="(err, i) in report.pluginErrors" :key="'plug-' + i">
           <AlertCircle :size="12" />
           <span>{{ err }}</span>
         </div>

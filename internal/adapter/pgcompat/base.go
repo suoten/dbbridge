@@ -134,18 +134,23 @@ func (a *Base) GetVersion(ctx context.Context) (string, error) {
 	return version, nil
 }
 
-// GetTables 获取所有表
+// GetTables 获取所有表。
+// 注意排除声明式分区的子表（relispartition）：它们由分区父表统一代表
+// （SELECT 父表即覆盖全部分区数据），单独列出会导致父表+子分区各迁一遍
+// 造成数据翻倍，且目标库分区结构无法保持。
 func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
-	commentExpr := `COALESCE(obj_description(quote_ident(table_name)::regclass, 'pg_class'), '')`
+	commentExpr := `COALESCE(obj_description(c.oid, 'pg_class'), '')`
 	if a.noComments {
 		commentExpr = `''`
 	}
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT table_name, `+commentExpr+`
-		FROM information_schema.tables
-		WHERE table_schema = 'public'
-		AND table_type = 'BASE TABLE'
-		ORDER BY table_name
+		SELECT c.relname, ` + commentExpr + `
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'public'
+		AND c.relkind IN ('r', 'p')
+		AND NOT c.relispartition
+		ORDER BY c.relname
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("%s: 查询表列表失败: %w", a.brand(), err)
@@ -243,6 +248,24 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 			`SELECT obj_description(`+ref+`::regclass, 'pg_class')`).Scan(&comment)
 		if err == nil && comment.Valid {
 			schema.Comment = comment.String
+		}
+	}
+
+	// 获取分区信息：声明式分区父表（relkind='p'）捕获 PARTITION BY 与全部后代。
+	// 查询失败静默降级（老版本 PG 无分区语法时 pg_get_partkeydef 不存在也不影响主流程）
+	var relOid int64
+	var relKind, partKey string
+	err := a.db.QueryRowContext(ctx, `
+		SELECT c.oid, c.relkind::text, COALESCE(pg_get_partkeydef(c.oid), '')
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
+		AND c.relkind IN ('r', 'p')
+	`, table, schemaName).Scan(&relOid, &relKind, &partKey)
+	if err == nil && relKind == "p" && partKey != "" {
+		schema.PartitionBy = partKey
+		if children, cerr := a.partitionDescendants(ctx, table, relOid); cerr == nil {
+			schema.Partitions = children
 		}
 	}
 
@@ -447,6 +470,38 @@ ORDER BY kcu.ordinal_position
 		return schema, fmt.Errorf("%s: 遍历索引信息失败: %w", a.brand(), err)
 	}
 
+	// 补充索引完整定义与访问方法（pg_get_indexdef 含 USING 方法/表达式列/操作符类/部分索引谓词）。
+	// 仅供 PG 系重建保真索引用；查询失败（如 CockroachDB 无 pg_am/pg_get_indexdef）静默降级，
+	// 回退到按列名重建 btree 的旧行为。
+	defRows, err := a.db.QueryContext(ctx, `
+		SELECT i.relname, am.amname, pg_get_indexdef(i.oid)
+		FROM pg_index ix
+		JOIN pg_class i ON i.oid = ix.indexrelid
+		JOIN pg_class t ON t.oid = ix.indrelid
+		JOIN pg_namespace n ON n.oid = t.relnamespace
+		JOIN pg_am am ON am.oid = i.relam
+		WHERE t.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
+		AND NOT ix.indisprimary
+	`, table, schemaName)
+	if err == nil {
+		defs := map[string][2]string{}
+		for defRows.Next() {
+			var name, method, def string
+			if err := defRows.Scan(&name, &method, &def); err == nil {
+				defs[name] = [2]string{method, def}
+			}
+		}
+		defRows.Close()
+		for i := range schema.Indexes {
+			if d, ok := defs[schema.Indexes[i].Name]; ok {
+				schema.Indexes[i].Type = strings.ToUpper(d[0])
+				schema.Indexes[i].Definition = d[1]
+			}
+		}
+	} else {
+		defRows.Close()
+	}
+
 	// CHECK 约束：pg_constraint.conbinode（二进制表达式）可用 pg_get_expr 还原为文本
 	// 使用限定名构造 regclass，避免 search_path 不含目标 schema 时转型失败
 	checkRef := `"` + escapeIdent(table) + `"`
@@ -499,37 +554,182 @@ func (a *Base) TableExists(ctx context.Context, tableName string) (bool, error) 
 	return count > 0, nil
 }
 
+// PartitionChildren 实现 types.TableHierarchyAware：返回分区后代（深度升序父先子后）。
+// 非分区表或表不存在时返回空切片。
+func (a *Base) PartitionChildren(ctx context.Context, tableName string) ([]types.PartitionMeta, error) {
+	schemaName, table := types.SplitQualified(tableName)
+	var oid int64
+	var relKind string
+	err := a.db.QueryRowContext(ctx, `
+		SELECT c.oid, c.relkind::text
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
+	`, table, schemaName).Scan(&oid, &relKind)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return []types.PartitionMeta{}, nil
+		}
+		return nil, fmt.Errorf("%s: 查询表失败: %w", a.brand(), err)
+	}
+	if relKind != "p" {
+		return []types.PartitionMeta{}, nil
+	}
+	return a.partitionDescendants(ctx, table, oid)
+}
+
+// partitionDescendants 递归查询分区表全部后代（含多级分区，深度升序、父先子后）。
+// Parent 字段按 oid→名字映射解析（根表名或先扫到的分区名）。
+func (a *Base) partitionDescendants(ctx context.Context, rootName string, rootOid int64) ([]types.PartitionMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		WITH RECURSIVE parts AS (
+			SELECT i.inhrelid AS oid, i.inhparent AS parent_oid, 1 AS depth
+			FROM pg_inherits i
+			WHERE i.inhparent = $1
+			UNION ALL
+			SELECT i.inhrelid, i.inhparent, parts.depth + 1
+			FROM pg_inherits i
+			JOIN parts ON i.inhparent = parts.oid
+		)
+		SELECT p.oid, p.parent_oid, c.relname,
+		       COALESCE(pg_get_expr(c.relpartbound, c.oid), ''),
+		       c.relkind = 'p',
+		       COALESCE(pg_get_partkeydef(c.oid), '')
+		FROM parts p
+		JOIN pg_class c ON c.oid = p.oid
+		ORDER BY p.depth, c.relname
+	`, rootOid)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询分区后代失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	nameByOid := map[int64]string{rootOid: rootName}
+	var out []types.PartitionMeta
+	for rows.Next() {
+		var oid, parentOid, depth int64
+		var m types.PartitionMeta
+		if err := rows.Scan(&oid, &parentOid, &m.Name, &m.Bound, &m.IsPartitioned, &m.PartitionBy); err != nil {
+			return nil, fmt.Errorf("%s: 读取分区后代失败: %w", a.brand(), err)
+		}
+		_ = depth // 深度仅用于 SQL 层排序，保证父先子后
+		m.Parent = nameByOid[parentOid]
+		nameByOid[oid] = m.Name
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历分区后代失败: %w", a.brand(), err)
+	}
+	return out, nil
+}
+
 // BackupTable 将表重命名为备份表名（支持 "schema.table" 限定名，
 // ALTER TABLE ... RENAME TO 的目标不带 schema，重命名后留在原 Schema，
-// 返回限定名便于后续恢复/删除定位）
+// 返回限定名便于后续恢复/删除定位）。
+// 分区父表：附带后代一并改名为 _bak_<子表名>_<时间戳>——RENAME 父表不会
+// 改子分区名，若不处理，重跑迁移建同名分区必然冲突。
 func (a *Base) BackupTable(ctx context.Context, tableName string) (string, error) {
 	schemaName, table := types.SplitQualified(tableName)
-	backupName := fmt.Sprintf("_bak_%s_%s", table, time.Now().Format("20060102_150405"))
+	ts := time.Now().Format("20060102_150405")
+	backupName := fmt.Sprintf("_bak_%s_%s", table, ts)
 	qualifiedBackup := backupName
 	if schemaName != "" {
 		qualifiedBackup = schemaName + "." + backupName
 	}
-	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
-		qualifyTable(tableName), escapeIdent(backupName)))
+
+	// 先取 oid（RENAME 不改 oid，供层级查询用）
+	var parentOid int64
+	var relKind string
+	err := a.db.QueryRowContext(ctx, `
+		SELECT c.oid, c.relkind::text
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
+	`, table, schemaName).Scan(&parentOid, &relKind)
 	if err != nil {
+		return "", fmt.Errorf("%s: 备份表失败（定位 %s 失败）: %w", a.brand(), tableName, err)
+	}
+
+	if _, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
+		qualifyTable(tableName), escapeIdent(backupName))); err != nil {
 		return "", fmt.Errorf("%s: 备份表失败 (%s→%s): %w", a.brand(), tableName, qualifiedBackup, err)
+	}
+
+	// 分区层级：按原层级结构逐个改名（pg_inherits 关系不随父表改名变化）
+	if relKind == "p" {
+		children, cerr := a.partitionDescendants(ctx, backupName, parentOid)
+		if cerr == nil {
+			for _, m := range children {
+				bakChild := fmt.Sprintf("_bak_%s_%s", m.Name, ts)
+				childRef := qualifyTable(m.Name)
+				if schemaName != "" {
+					childRef = qualifyTable(schemaName + "." + m.Name)
+				}
+				if _, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
+					childRef, escapeIdent(bakChild))); err != nil {
+					return "", fmt.Errorf("%s: 备份分区 %s 失败: %w", a.brand(), m.Name, err)
+				}
+			}
+		}
+		// 层级查询失败不阻断备份主体（父表已改名成功），仅子分区保持原名
 	}
 	return qualifiedBackup, nil
 }
 
 // RestoreFromBackup 从备份表恢复（删除当前同名表，将备份表重命名回原表名）。
 // 注意：RENAME TO 目标侧不能带 schema（PG 语法限制），
-// 重命名后留在备份表所在 schema（与原表同 schema，语义正确）
+// 重命名后留在备份表所在 schema（与原表同 schema，语义正确）。
+// 分区层级：备份的后代分区按 _bak_ 前缀+时间戳逆改名回原名，恢复完整层级。
 func (a *Base) RestoreFromBackup(ctx context.Context, backupName, originalName string) error {
+	_, bakBare := types.SplitQualified(backupName)
+	// 备份名时间戳后缀（BackupTable 生成的 _bak_<table>_<20060102>_<150405>）
+	tsRe := regexp.MustCompile(`_(\d{8}_\d{6})$`)
+	ts := ""
+	if m := tsRe.FindStringSubmatch(bakBare); m != nil {
+		ts = m[1]
+	}
+
+	// 备份层级后代（改名前查询：pg_inherits 关系稳定，oid 不随 RENAME 变化）
+	schemaName, _ := types.SplitQualified(originalName)
+	var bakOid int64
+	var relKind string
+	_ = a.db.QueryRowContext(ctx, `
+		SELECT c.oid, c.relkind::text
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
+	`, bakBare, schemaName).Scan(&bakOid, &relKind)
+
 	exists, _ := a.TableExists(ctx, originalName)
 	if exists {
-		// 不用 CASCADE：级联会静默删除依赖视图/外键，把“恢复备份”变成数据破坏。
+		// 不用 CASCADE：级联会静默删除依赖视图/外键，把"恢复备份"变成数据破坏。
 		// 有依赖时 DROP 报错，用户可显式处理依赖后再恢复。
 		_, err := a.db.ExecContext(ctx, fmt.Sprintf(`DROP TABLE IF EXISTS %s`, qualifyTable(originalName)))
 		if err != nil {
 			return fmt.Errorf("%s: 恢复备份时删除当前表失败（可能存在依赖视图/外键，请先处理依赖）: %w", a.brand(), err)
 		}
 	}
+
+	// 分区层级：先恢复子分区名（此时原分区名已被上面的 DROP 释放）
+	if relKind == "p" && ts != "" {
+		if children, cerr := a.partitionDescendants(ctx, bakBare, bakOid); cerr == nil {
+			for _, m := range children {
+				if !strings.HasSuffix(m.Name, "_"+ts) {
+					continue
+				}
+				origChild := strings.TrimSuffix(m.Name, "_"+ts)
+				childRef := qualifyTable(m.Name)
+				if schemaName != "" {
+					childRef = qualifyTable(schemaName + "." + m.Name)
+				}
+				if _, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
+					childRef, escapeIdent(origChild))); err != nil {
+					return fmt.Errorf("%s: 恢复分区 %s 失败: %w", a.brand(), m.Name, err)
+				}
+			}
+		}
+	}
+
 	_, bare := types.SplitQualified(originalName)
 	_, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s RENAME TO "%s"`,
 		qualifyTable(backupName), escapeIdent(bare)))
@@ -615,6 +815,12 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 
 	sb.WriteString("\n)")
 
+	// 分区键（PG 声明式分区，pg_get_partkeydef 已含 RANGE/LIST/HASH 关键字，
+	// 如 "RANGE (year)"）。必须在建表语句内声明，否则分区结构丢失。
+	if table.PartitionBy != "" {
+		sb.WriteString("\nPARTITION BY " + table.PartitionBy)
+	}
+
 	// 表空间（可选；未配置时使用目标库默认值）
 	if a.tablespace != "" {
 		sb.WriteString(fmt.Sprintf("\nTABLESPACE \"%s\"", escapeIdent(a.tablespace)))
@@ -633,6 +839,30 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 		}
 	}
 
+	// 分区子表：CREATE TABLE ... PARTITION OF ...（深度升序保证父先子后，支持多级分区）。
+	// 数据写入父表时由 PG 按分区键自动路由，无需单独迁数据。
+	// 子分区与父表同 schema（PG 约束），限定名从目标表名推导以兼容 Schema 映射。
+	if len(table.Partitions) > 0 {
+		pSchema, _ := types.SplitQualified(table.Name)
+		qual := func(name string) string {
+			if pSchema == "" {
+				return `"` + escapeIdent(name) + `"`
+			}
+			return `"` + escapeIdent(pSchema) + `".` + `"` + escapeIdent(name) + `"`
+		}
+		for _, m := range table.Partitions {
+			sb.WriteString(";\n")
+			stmt := fmt.Sprintf("CREATE TABLE %s PARTITION OF %s", qual(m.Name), qual(m.Parent))
+			if m.Bound != "" {
+				stmt += " " + m.Bound
+			}
+			if m.IsPartitioned && m.PartitionBy != "" {
+				stmt += " PARTITION BY " + m.PartitionBy
+			}
+			sb.WriteString(stmt)
+		}
+	}
+
 	// 非主键索引
 	for _, idx := range table.Indexes {
 		if idx.IsPrimary {
@@ -644,6 +874,19 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 			idxName = fmt.Sprintf("idx_%s_%s", table.Name, strings.Join(idx.Columns, "_"))
 		}
 		sb.WriteString(";\n")
+		uniquePrefix := ""
+		if idx.IsUnique {
+			uniquePrefix = "UNIQUE "
+		}
+		// 完整定义优先（GIN/GiST/表达式列/操作符类/部分索引保真，如 trgm、PostGIS 索引）。
+		// 定义形如 "CREATE [UNIQUE] INDEX <源名> ON <源schema>.<源表> USING gin (...)"，
+		// 取 "USING ..."（或无 USING 时的 "(...)"）之后的部分，替换为本次运行的去重索引名
+		// 与目标侧限定表名，避免把源 schema 硬编码进目标 DDL。
+		if tail, ok := indexDefTail(idx.Definition); ok {
+			sb.WriteString(fmt.Sprintf("CREATE %sINDEX \"%s\" ON %s %s",
+				uniquePrefix, escapeIdent(a.runIndexName(idxName)), qualifyTable(table.Name), tail))
+			continue
+		}
 		if idx.IsUnique {
 			sb.WriteString(fmt.Sprintf("CREATE UNIQUE INDEX \"%s\" ON %s (", escapeIdent(a.runIndexName(idxName)), qualifyTable(table.Name)))
 		} else {
@@ -659,6 +902,27 @@ func (a *Base) GenerateCreateTableDDL(table types.TableSchema) (string, error) {
 	}
 
 	return sb.String(), nil
+}
+
+// indexDefTail 从 pg_get_indexdef 的完整定义中截取 "USING ..."（或无 USING 时的
+// "(...)" 列定义）之后的部分。解析失败返回 false，调用方回退到按列重建。
+func indexDefTail(def string) (string, bool) {
+	if def == "" {
+		return "", false
+	}
+	on := strings.Index(def, " ON ")
+	if on < 0 {
+		return "", false
+	}
+	rest := def[on+len(" ON "):]
+	if u := strings.Index(rest, " USING "); u >= 0 {
+		return rest[u+1:], true
+	}
+	p := strings.Index(rest, " (")
+	if p < 0 {
+		return "", false
+	}
+	return rest[p+1:], true
 }
 
 // GenerateDropTableDDL 生成删表 SQL
@@ -972,6 +1236,44 @@ func (a *Base) GenerateRoutineDDL(routine types.RoutineMeta, targetDialect types
 		return "", fmt.Errorf("%s: 暂不支持将存储过程/函数自动转换为 %s 方言（函数体为 PL/pgSQL），请在目标库手动创建",
 			a.brand(), targetDialect)
 	}
+}
+
+// ListPlugins 获取已安装的插件/扩展列表（如 PostGIS、pg_trgm）。
+// plpgsql 是过程语言（每个库默认自带、随库存在），不属于需要迁移的业务插件。
+func (a *Base) ListPlugins(ctx context.Context) ([]types.PluginMeta, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT e.extname, e.extversion
+		FROM pg_extension e
+		WHERE e.extname NOT IN ('plpgsql')
+		ORDER BY e.extname
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询插件列表失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	var plugins []types.PluginMeta
+	for rows.Next() {
+		var name, version string
+		if err := rows.Scan(&name, &version); err != nil {
+			return nil, fmt.Errorf("%s: 读取插件列表失败: %w", a.brand(), err)
+		}
+		plugins = append(plugins, types.PluginMeta{Name: name, Version: version})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历插件列表失败: %w", a.brand(), err)
+	}
+	return plugins, nil
+}
+
+// CreatePluginDDL 生成创建插件的 DDL。
+// IF NOT EXISTS 保证幂等（目标库已存在时跳过）；不锁定 VERSION，
+// 避免源/目标版本不一致时创建失败，由目标库装好的默认版本兜底。
+func (a *Base) CreatePluginDDL(plugin types.PluginMeta) (string, error) {
+	if plugin.Name == "" {
+		return "", fmt.Errorf("%s: 插件名为空", a.brand())
+	}
+	return fmt.Sprintf("CREATE EXTENSION IF NOT EXISTS %s;", escapeIdent(plugin.Name)), nil
 }
 
 // GenerateAddForeignKeyDDL 生成 "ALTER TABLE ... ADD CONSTRAINT ..."（外键延后添加用）

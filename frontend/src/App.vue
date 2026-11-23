@@ -28,6 +28,7 @@ import {
   Link2,
   FolderInput,
   HardDrive,
+  Puzzle,
 } from '@lucide/vue'
 import ConnectionForm, { type ConnectionConfig } from './components/ConnectionForm.vue'
 import ProgressPanel from './components/ProgressPanel.vue'
@@ -38,6 +39,7 @@ import SqlTools from './components/SqlTools.vue'
 import DataValidator from './components/DataValidator.vue'
 import MigrationGuide from './components/MigrationGuide.vue'
 import ConnStrings from './components/ConnStrings.vue'
+import * as api from './api'
 
 type Tab = 'source' | 'tables' | 'migrate' | 'backup' | 'sqltools' | 'validate' | 'guide' | 'connstr'
 
@@ -86,6 +88,7 @@ const migrationConfig = ref({
   autoRollback: true,
   migrateTriggers: false,
   migrateRoutines: false,
+  migratePlugins: false,
   // Schema 映射与表空间（留空时行为与既往版本完全一致）
   schemaDefault: '',
   tablespace: '',
@@ -121,8 +124,7 @@ async function loadTables() {
   loadingTables.value = true
   tablesError.value = ''
   try {
-    // @ts-ignore - Wails binding
-    const result = await window.go.main.App.GetTables(sourceConfig.value)
+    const result = await api.GetTables(sourceConfig.value)
     if (result.success) {
       tables.value = (result.tables || []).map((t: any) => ({
         name: t.name,
@@ -180,8 +182,7 @@ async function startMigration() {
       schemaDefault: migrationConfig.value.schemaDefault.trim(),
       tablespace: migrationConfig.value.tablespace.trim(),
     }
-    // @ts-ignore - Wails binding
-    report.value = await window.go.main.App.StartMigration(req)
+    report.value = await api.StartMigration(req)
   } catch (e: any) {
     // 迁移启动失败必须让用户看到，不能只留在控制台
     migrationError.value = e?.message || String(e)
@@ -645,6 +646,17 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
                   </div>
                   <input class="input batch-input" type="text" v-model="migrationConfig.tablespace" placeholder="可选" />
                 </div>
+
+                <label class="option-item" :class="{ checked: migrationConfig.migratePlugins }">
+                  <input type="checkbox" v-model="migrationConfig.migratePlugins" />
+                  <div class="option-content">
+                    <Puzzle :size="16" class="option-icon" />
+                    <div>
+                      <span class="option-label">插件迁移</span>
+                      <span class="option-hint">迁移数据库扩展（如 PostGIS）</span>
+                    </div>
+                  </div>
+                </label>
               </div>
 
               <!-- 按表 Schema 覆盖 -->
