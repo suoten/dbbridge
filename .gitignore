@@ -68,3 +68,7 @@ design/
 *.log
 tmp/
 tmp_test/
+
+# ---- 本地工具/测试产物（不入库）----
+.zcode/
+gui-test-screenshots/
