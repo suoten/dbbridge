@@ -144,7 +144,7 @@ func (a *Base) GetTables(ctx context.Context) ([]types.TableMeta, error) {
 		commentExpr = `''`
 	}
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT c.relname, ` + commentExpr + `
+		SELECT c.relname, `+commentExpr+`
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = 'public'
@@ -332,6 +332,13 @@ func (a *Base) GetTableSchema(ctx context.Context, tableName string) (types.Tabl
 		return schema, fmt.Errorf("%s: 遍历列信息失败: %w", a.brand(), err)
 	}
 	schema.Columns = columns
+
+	// 精确类型解析：information_schema 对不在 pg_catalog 的类型（PostGIS geometry/
+	// geography 等扩展类型、枚举、复合类型）一律报 USER-DEFINED，数组报 ARRAY，
+	// 原样写进建表 SQL 会语法错误，必须换成 pg_attribute + format_type 的精确类型名
+	if err := a.resolveExactTypes(ctx, table, schemaName, columns); err != nil {
+		return schema, err
+	}
 
 	// 获取主键
 	pkRows, err := a.db.QueryContext(ctx, `
@@ -746,6 +753,176 @@ func (a *Base) DropBackup(ctx context.Context, backupName string) error {
 		return fmt.Errorf("%s: 删除备份表失败: %w", a.brand(), err)
 	}
 	return nil
+}
+
+// resolveExactTypes 把 information_schema 报为 USER-DEFINED/ARRAY 的列替换为
+// format_type 的精确类型名（如 geometry(PointZ,4490)、mood、pair、text[]），
+// 并标记 ExactType（PG 系目标原样使用，其他目标库退回通用类型）。
+func (a *Base) resolveExactTypes(ctx context.Context, table, schemaName string, columns []types.ColumnMeta) error {
+	var targets []int
+	for i, c := range columns {
+		if c.DataType == "USER-DEFINED" || c.DataType == "ARRAY" {
+			targets = append(targets, i)
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+		FROM pg_attribute a
+		JOIN pg_class c ON c.oid = a.attrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1 AND n.nspname = COALESCE(NULLIF($2, ''), 'public')
+		AND a.attnum > 0 AND NOT a.attisdropped
+	`, table, schemaName)
+	if err != nil {
+		return fmt.Errorf("%s: 查询列精确类型失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	exact := map[string]string{}
+	for rows.Next() {
+		var name, typ string
+		if err := rows.Scan(&name, &typ); err != nil {
+			return fmt.Errorf("%s: 读取列精确类型失败: %w", a.brand(), err)
+		}
+		exact[name] = typ
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("%s: 遍历列精确类型失败: %w", a.brand(), err)
+	}
+
+	for _, i := range targets {
+		typ, ok := exact[columns[i].Name]
+		if !ok || typ == "" {
+			continue // 解析不到时保留原值，由后续建表报错暴露
+		}
+		typ = stripTypeSchema(typ)
+		columns[i].DataType = typ
+		columns[i].BaseType = strings.ToUpper(typ)
+		columns[i].ExactType = true
+	}
+	return nil
+}
+
+// stripTypeSchema 去掉类型名的 schema 限定（"s1.mood" → "mood"）。
+// 目标 DDL 统一引用裸名：类型随目标库默认 schema 创建，与表名映射策略一致。
+// 带引号的标识符可能含点，不做处理；typmod/数组记号内的点也不是 schema 分隔符。
+func stripTypeSchema(typ string) string {
+	if strings.HasPrefix(typ, `"`) {
+		return typ
+	}
+	i := strings.LastIndex(typ, ".")
+	if i > 0 && !strings.ContainsAny(typ[:i], "()[]") {
+		return typ[i+1:]
+	}
+	return typ
+}
+
+// EnumTypes 实现 types.EnumTypeAware：返回给定表的列引用的枚举类型及标签（去重）。
+func (a *Base) EnumTypes(ctx context.Context, tables []string) ([]types.EnumTypeMeta, error) {
+	if len(tables) == 0 {
+		return []types.EnumTypeMeta{}, nil
+	}
+	schemas := make([]string, len(tables))
+	names := make([]string, len(tables))
+	for i, t := range tables {
+		schemas[i], names[i] = types.SplitQualified(t)
+	}
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT DISTINCT t.typname,
+		       ARRAY(SELECT e.enumlabel FROM pg_enum e WHERE e.enumtypid = t.oid ORDER BY e.enumsortorder)
+		FROM unnest($1::text[], $2::text[]) AS tbl(schema, name)
+		JOIN pg_namespace cn ON cn.nspname = COALESCE(NULLIF(tbl.schema, ''), 'public')
+		JOIN pg_class c ON c.relnamespace = cn.oid AND c.relname = tbl.name
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+		JOIN pg_type t ON t.oid = a.atttypid
+		WHERE t.typtype = 'e'
+		ORDER BY t.typname
+	`, pq.Array(schemas), pq.Array(names))
+	if err != nil {
+		return nil, fmt.Errorf("%s: 查询枚举类型失败: %w", a.brand(), err)
+	}
+	defer rows.Close()
+
+	var enums []types.EnumTypeMeta
+	for rows.Next() {
+		var e types.EnumTypeMeta
+		if err := rows.Scan(&e.Name, pq.Array(&e.Labels)); err != nil {
+			return nil, fmt.Errorf("%s: 读取枚举类型失败: %w", a.brand(), err)
+		}
+		enums = append(enums, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%s: 遍历枚举类型失败: %w", a.brand(), err)
+	}
+	return enums, nil
+}
+
+// EnsureEnumType 实现 types.EnumTypeAware：目标库缺该枚举类型则创建；
+// 已存在则补齐源库有而目标库没有的标签（ALTER TYPE ADD VALUE，不改已有标签的顺序）。
+// 类型名按裸名解析/创建，落在目标库默认 schema。
+func (a *Base) EnsureEnumType(ctx context.Context, enum types.EnumTypeMeta) (bool, int, error) {
+	if enum.Name == "" {
+		return false, 0, fmt.Errorf("%s: 枚举类型名为空", a.brand())
+	}
+	quoted := `"` + escapeIdent(enum.Name) + `"`
+
+	// to_regtype 对不存在的类型返回 NULL（::regtype 会直接报错）
+	var oid sql.NullInt64
+	if err := a.db.QueryRowContext(ctx, `SELECT to_regtype($1)::oid`, quoted).Scan(&oid); err != nil {
+		return false, 0, fmt.Errorf("%s: 检查枚举类型 %s 失败: %w", a.brand(), enum.Name, err)
+	}
+	if !oid.Valid {
+		if len(enum.Labels) == 0 {
+			return false, 0, fmt.Errorf("%s: 枚举类型 %s 无标签，无法创建", a.brand(), enum.Name)
+		}
+		quotedLabels := make([]string, len(enum.Labels))
+		for i, l := range enum.Labels {
+			quotedLabels[i] = `'` + escapeSingleQuote(l) + `'`
+		}
+		if _, err := a.db.ExecContext(ctx, fmt.Sprintf(`CREATE TYPE %s AS ENUM (%s)`,
+			quoted, strings.Join(quotedLabels, ", "))); err != nil {
+			return false, 0, fmt.Errorf("%s: 创建枚举类型 %s 失败: %w", a.brand(), enum.Name, err)
+		}
+		return true, 0, nil
+	}
+
+	// 已存在：补齐缺失标签
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT e.enumlabel FROM pg_enum e WHERE e.enumtypid = $1 ORDER BY e.enumsortorder
+	`, int32(oid.Int64))
+	if err != nil {
+		return false, 0, fmt.Errorf("%s: 读取枚举类型 %s 标签失败: %w", a.brand(), enum.Name, err)
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			rows.Close()
+			return false, 0, fmt.Errorf("%s: 读取枚举类型 %s 标签失败: %w", a.brand(), enum.Name, err)
+		}
+		existing[label] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, 0, fmt.Errorf("%s: 遍历枚举类型 %s 标签失败: %w", a.brand(), enum.Name, err)
+	}
+
+	added := 0
+	for _, l := range enum.Labels {
+		if existing[l] {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, fmt.Sprintf(`ALTER TYPE %s ADD VALUE IF NOT EXISTS %s`,
+			quoted, `'`+escapeSingleQuote(l)+`'`)); err != nil {
+			return false, 0, fmt.Errorf("%s: 枚举类型 %s 补充标签 %q 失败: %w", a.brand(), enum.Name, l, err)
+		}
+		added++
+	}
+	return false, added, nil
 }
 
 // GenerateCreateTableDDL 生成建表 SQL（类型经 typeconv 映射，支持异构迁移）

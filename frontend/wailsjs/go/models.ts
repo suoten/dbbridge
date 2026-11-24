@@ -328,6 +328,7 @@ export namespace main {
 	    autoRollback: boolean;
 	    migrateTriggers: boolean;
 	    migrateRoutines: boolean;
+	    migratePlugins: boolean;
 	    schemaDefault?: string;
 	    schemaTables?: Record<string, string>;
 	    tablespace?: string;
@@ -351,6 +352,7 @@ export namespace main {
 	        this.autoRollback = source["autoRollback"];
 	        this.migrateTriggers = source["migrateTriggers"];
 	        this.migrateRoutines = source["migrateRoutines"];
+	        this.migratePlugins = source["migratePlugins"];
 	        this.schemaDefault = source["schemaDefault"];
 	        this.schemaTables = source["schemaTables"];
 	        this.tablespace = source["tablespace"];
@@ -891,6 +893,7 @@ export namespace types {
 	    comment?: string;
 	    isPrimaryKey: boolean;
 	    generated?: boolean;
+	    exactType?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ColumnMeta(source);
@@ -911,6 +914,7 @@ export namespace types {
 	        this.comment = source["comment"];
 	        this.isPrimaryKey = source["isPrimaryKey"];
 	        this.generated = source["generated"];
+	        this.exactType = source["exactType"];
 	    }
 	}
 	export class ConnectionConfig {
@@ -969,6 +973,7 @@ export namespace types {
 	    isUnique: boolean;
 	    isPrimary: boolean;
 	    type?: string;
+	    definition?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new IndexMeta(source);
@@ -981,6 +986,7 @@ export namespace types {
 	        this.isUnique = source["isUnique"];
 	        this.isPrimary = source["isPrimary"];
 	        this.type = source["type"];
+	        this.definition = source["definition"];
 	    }
 	}
 	export class TableReport {
@@ -1026,6 +1032,8 @@ export namespace types {
 	    routinesMigrated?: number;
 	    triggerErrors?: string[];
 	    routineErrors?: string[];
+	    pluginsMigrated?: number;
+	    pluginErrors?: string[];
 	    fkErrors?: string[];
 	
 	    static createFrom(source: any = {}) {
@@ -1052,6 +1060,8 @@ export namespace types {
 	        this.routinesMigrated = source["routinesMigrated"];
 	        this.triggerErrors = source["triggerErrors"];
 	        this.routineErrors = source["routineErrors"];
+	        this.pluginsMigrated = source["pluginsMigrated"];
+	        this.pluginErrors = source["pluginErrors"];
 	        this.fkErrors = source["fkErrors"];
 	    }
 	
@@ -1072,6 +1082,26 @@ export namespace types {
 		    }
 		    return a;
 		}
+	}
+	export class PartitionMeta {
+	    name: string;
+	    parent?: string;
+	    bound?: string;
+	    isPartitioned?: boolean;
+	    partitionBy?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PartitionMeta(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.parent = source["parent"];
+	        this.bound = source["bound"];
+	        this.isPartitioned = source["isPartitioned"];
+	        this.partitionBy = source["partitionBy"];
+	    }
 	}
 	export class TableMeta {
 	    name: string;
@@ -1123,6 +1153,8 @@ export namespace types {
 	    collation?: string;
 	    checks?: CheckMeta[];
 	    triggers?: TriggerMeta[];
+	    partitionBy?: string;
+	    partitions?: PartitionMeta[];
 	
 	    static createFrom(source: any = {}) {
 	        return new TableSchema(source);
@@ -1140,6 +1172,8 @@ export namespace types {
 	        this.collation = source["collation"];
 	        this.checks = this.convertValues(source["checks"], CheckMeta);
 	        this.triggers = this.convertValues(source["triggers"], TriggerMeta);
+	        this.partitionBy = source["partitionBy"];
+	        this.partitions = this.convertValues(source["partitions"], PartitionMeta);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

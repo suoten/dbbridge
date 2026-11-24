@@ -304,6 +304,14 @@ func ToMySQL(k Kind, col types.ColumnMeta) string {
 	case KindSet:
 		return "VARCHAR(200)"
 	default:
+		if col.ExactType {
+			// PG 扩展类型/枚举/数组的值按文本迁移；几何对象十六进制编码可能很大，用 LONGTEXT。
+			// 同上：TEXT 家族不能带非常量默认值，有则降级为 VARCHAR
+			if needsDegrade(col) {
+				return toSize("VARCHAR", col.Length, 500)
+			}
+			return "LONGTEXT"
+		}
 		return fallback(col, "TEXT")
 	}
 }
@@ -362,6 +370,10 @@ func ToPostgres(k Kind, col types.ColumnMeta) string {
 	case KindSet:
 		return "VARCHAR(200)"
 	default:
+		// PG 扩展类型/枚举/数组/inet 等精确类型在 PG 系目标原样使用（如 geometry(PointZ,4490)）
+		if col.ExactType && col.DataType != "" {
+			return col.DataType
+		}
 		return fallback(col, "TEXT")
 	}
 }
@@ -463,7 +475,12 @@ func toSizeNVarChar(name string, n *int, def int) string {
 }
 
 // fallback 未知类型时的兜底：尽量保留原始类型声明，否则退到 def。
+// ExactType 列（PG 扩展类型/枚举/数组等）的原始声明只有 PG 系认识，
+// 其他目标库必须退到各方言的通用类型（PG 系的透传在 ToPostgres 里单独处理）。
 func fallback(col types.ColumnMeta, def string) string {
+	if col.ExactType {
+		return def
+	}
 	if col.DataType != "" {
 		return col.DataType
 	}

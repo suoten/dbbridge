@@ -490,6 +490,12 @@ func (o *Orchestrator) Run(ctx context.Context) (*types.MigrationReport, error) 
 	o.mu.Unlock()
 	o.log("INFO", "", fmt.Sprintf("待迁移表数: %d, 并发数: %d", len(tables), o.workerCount()))
 
+	// 1.6 迁移枚举类型：表列引用的枚举必须先于建表存在（PG 系）。
+	// 仅迁数据模式不建表，无需处理。
+	if !o.config.DataOnly {
+		o.migrateEnumTypes(runCtx, tables)
+	}
+
 	// 先删后建：按依赖逆序（子表先删）预删除目标表。
 	// 并行乱序删除会被子表外键阻塞（PG 2BP01 / MySQL 3730 / MSSQL 3726），
 	// 真实库集成测试实测：orders.user_id → users.id 时先删 users 必败。
@@ -862,7 +868,7 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 				continue
 			}
 			if err := o.targetAdapter.ExecContext(ctx, stmt); err != nil {
-				return 0, fmt.Errorf("执行建表SQL失败: %w (SQL: %s)", err, truncate(stmt, 500))
+				return 0, fmt.Errorf("执行建表SQL失败: %w (SQL: %s)%s", err, truncate(stmt, 500), missingTypeHint(schema, err))
 			}
 		}
 		o.log("INFO", tableName, "表结构创建完成")
@@ -910,6 +916,10 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 		for _, c := range schema.Columns {
 			switch typeconv.Normalize(c.BaseType) {
 			case typeconv.KindBlob, typeconv.KindText, typeconv.KindJSON:
+				hasLOB = true
+			}
+			// 扩展类型（如 PostGIS geometry）的十六进制文本编码可能很大，同样按大字段处理
+			if c.ExactType {
 				hasLOB = true
 			}
 			if hasLOB {
@@ -1059,6 +1069,81 @@ func (o *Orchestrator) migrateTable(ctx context.Context, tableName, targetName s
 // sourceName 用于查找备份记录（BackupInfo.OriginalTable 存源表名），
 // targetName（目标限定表名）用于目标库上的恢复操作。
 // 注意：RestoreFromBackup 是网络 I/O，必须在锁外执行，否则会阻塞所有进度上报。
+// migrateEnumTypes 迁移枚举类型：读取源库中选定表的列引用的枚举类型，
+// 在目标库创建缺失的类型并补齐缺失的标签（PG 系）。
+// 源或目标不支持时静默跳过；单个类型处理失败仅记录错误不中断——
+// 引用它的表会在建表时报 type "xxx" does not exist，由各表结果体现。
+func (o *Orchestrator) migrateEnumTypes(ctx context.Context, tables []string) {
+	if o.sourceAdapter == nil || len(tables) == 0 {
+		return
+	}
+	src, ok := o.sourceAdapter.(types.EnumTypeAware)
+	if !ok {
+		return
+	}
+	tgt, ok := o.targetAdapter.(types.EnumTypeAware)
+	if !ok {
+		return
+	}
+	enums, err := src.EnumTypes(ctx, tables)
+	if err != nil {
+		o.log("WARN", "", fmt.Sprintf("读取源库枚举类型失败: %v", err))
+		return
+	}
+	if len(enums) == 0 {
+		return
+	}
+	o.log("INFO", "", fmt.Sprintf("发现 %d 个枚举类型，开始检查目标库...", len(enums)))
+	for _, e := range enums {
+		if ctx.Err() != nil {
+			return
+		}
+		created, added, err := tgt.EnsureEnumType(ctx, e)
+		if err != nil {
+			o.log("ERROR", "", fmt.Sprintf("枚举类型 %s 处理失败: %v", e.Name, err))
+			continue
+		}
+		switch {
+		case created:
+			o.log("INFO", "", fmt.Sprintf("枚举类型 %s 创建成功（%d 个标签）", e.Name, len(e.Labels)))
+		case added > 0:
+			o.log("INFO", "", fmt.Sprintf("枚举类型 %s 已存在，补齐 %d 个缺失标签", e.Name, added))
+		default:
+			o.log("INFO", "", fmt.Sprintf("枚举类型 %s 已存在", e.Name))
+		}
+	}
+}
+
+// missingTypeHint 建表报错涉及扩展/自定义类型缺失时补充可操作提示。
+// 典型场景：源表含 PostGIS geometry 列，目标库未装 PostGIS（未开启插件迁移）
+// 或缺少枚举等自定义类型，PG 报 type "geometry" does not exist。
+func missingTypeHint(schema types.TableSchema, err error) string {
+	if !strings.Contains(err.Error(), "does not exist") {
+		return ""
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, c := range schema.Columns {
+		if !c.ExactType {
+			continue
+		}
+		name := c.DataType
+		if i := strings.IndexAny(name, "(["); i >= 0 {
+			name = name[:i]
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n提示: 该表使用了扩展/自定义类型 %s，目标库缺少对应的扩展或类型。"+
+		"PostgreSQL 系目标请开启「插件迁移」（如 PostGIS），或先在目标库手动安装扩展/创建类型后重试",
+		strings.Join(names, ", "))
+}
+
 // backupStalePartitionChildren 分区父表备份后的兜底：旧版本把分区当普通表
 // 平铺迁移，目标库遗留与源分区子表同名的游离独立表（不挂在任何层级下），
 // BackupTable 的层级改名覆盖不到它们，需逐个改名让位，否则新层级建

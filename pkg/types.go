@@ -75,6 +75,10 @@ type ColumnMeta struct {
 	Comment       string  `json:"comment,omitempty"`
 	IsPrimaryKey  bool    `json:"isPrimaryKey"`
 	Generated     bool    `json:"generated,omitempty"` // 生成列（GENERATED ALWAYS AS / COMPUTED），不可显式 INSERT
+	// ExactType 表示 DataType 是源库的精确类型名，中立类型体系无法表达
+	// （PG 扩展类型 geometry、枚举、复合类型、数组 text[] 等）。
+	// PG 系目标原样使用该类型；其他目标库退回通用类型（值按文本迁移）。
+	ExactType bool `json:"exactType,omitempty"`
 }
 
 // IndexMeta 索引的元数据
@@ -202,6 +206,22 @@ type TableHierarchyAware interface {
 	// PartitionChildren 返回表的分区后代（含多级，按深度升序、父先于子）。
 	// 非分区表或无后代时返回空切片而非错误。
 	PartitionChildren(ctx context.Context, tableName string) ([]PartitionMeta, error)
+}
+
+// EnumTypeMeta 枚举类型定义
+type EnumTypeMeta struct {
+	Name   string   `json:"name"`   // 类型名（裸名，不带 schema）
+	Labels []string `json:"labels"` // 枚举标签，按源库定义顺序
+}
+
+// EnumTypeAware 支持枚举类型读取与创建的适配器（PG 系）。
+// 表列引用的枚举类型必须先于建表存在，否则建表报 type "xxx" does not exist。
+type EnumTypeAware interface {
+	// EnumTypes 返回给定表的列所引用的枚举类型（去重）；无则返回空切片
+	EnumTypes(ctx context.Context, tables []string) ([]EnumTypeMeta, error)
+	// EnsureEnumType 确保枚举类型存在：缺失则创建；已存在则补齐目标库缺少的标签。
+	// created 表示是否为本次新建，added 为补齐的标签数。
+	EnsureEnumType(ctx context.Context, enum EnumTypeMeta) (created bool, added int, err error)
 }
 
 // SplitQualified 将可能带 Schema 限定的表名拆分为 (schema, table)。
