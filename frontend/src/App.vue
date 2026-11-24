@@ -29,6 +29,7 @@ import {
   FolderInput,
   HardDrive,
   Puzzle,
+  Layers,
 } from '@lucide/vue'
 import ConnectionForm, { type ConnectionConfig } from './components/ConnectionForm.vue'
 import ProgressPanel from './components/ProgressPanel.vue'
@@ -82,6 +83,7 @@ const migrationConfig = ref({
   structureOnly: false,
   dataOnly: false,
   batchSize: 5000,
+  concurrency: 4, // 并发表数：同时迁移几张表（后端上限 8）
   dropIfExists: true,
   ignoreErrors: false,
   backupBefore: true,
@@ -164,6 +166,12 @@ function goToTables() {
   }
 }
 
+// positiveInt 取正整数；空串/非数字/非正数返回 undefined（调用方不传该字段）
+function positiveInt(v: unknown): number | undefined {
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined
+}
+
 async function startMigration() {
   migrating.value = true
   report.value = null
@@ -175,6 +183,10 @@ async function startMigration() {
       target: targetConfig.value,
       tables: selectedTables.value,
       ...migrationConfig.value,
+      // 数值参数：输入框清空或填了非法值时不传，由后端取默认值（批量 5000、并发 4）。
+      // v-model.number 在输入框清空时得到空串，原样传出去会让后端 JSON 解析整数失败
+      batchSize: positiveInt(migrationConfig.value.batchSize),
+      concurrency: positiveInt(migrationConfig.value.concurrency),
       // 过滤空值，避免向后端传递无效覆盖项
       schemaTables: Object.fromEntries(
         Object.entries(migrationConfig.value.schemaTables).filter(([, s]) => s && s.trim() !== '')
@@ -622,7 +634,18 @@ const isMigrationFlow = computed(() => activeTab.value !== 'backup')
                       <span class="option-hint">每次写入行数</span>
                     </div>
                   </div>
-                  <input class="input batch-input" type="number" v-model.number="migrationConfig.batchSize" />
+                  <input class="input batch-input" type="number" min="1" step="1" v-model.number="migrationConfig.batchSize" />
+                </div>
+
+                <div class="option-item option-input">
+                  <div class="option-content">
+                    <Layers :size="16" class="option-icon" />
+                    <div>
+                      <span class="option-label">并发表数</span>
+                      <span class="option-hint">同时迁移几张表（最多 8）</span>
+                    </div>
+                  </div>
+                  <input class="input batch-input" type="number" min="1" max="8" step="1" v-model.number="migrationConfig.concurrency" />
                 </div>
 
                 <div class="option-item option-input">
@@ -1240,7 +1263,10 @@ padding: 8px 4px 4px;
   pointer-events: none;
 }
 
-.option-item input {
+/* 仅隐藏开关卡片的 checkbox（点击整张卡片即切换）。
+   不能写成 .option-item input —— 那会连「批量大小 / 目标 Schema / 目标表空间」
+   卡片里的文本输入框一起隐藏，导致这些选项无法编辑 */
+.option-item > input[type="checkbox"] {
   display: none;
 }
 
@@ -1274,15 +1300,19 @@ padding: 8px 4px 4px;
   margin-top: 1px;
 }
 
+/* 输入型卡片：标签在上、输入框整行在下。卡片宽度有限（窄屏约 190px），
+   与标签并排放不下 Schema/表空间名 */
 .option-input {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  cursor: default;
 }
 
 .batch-input {
-  width: 80px;
-  padding: 5px 8px;
+  width: 100%;
+  padding: 6px 8px;
   font-size: 12px;
 }
 
